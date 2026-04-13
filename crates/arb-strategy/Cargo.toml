@@ -1,0 +1,16 @@
+[package]
+name = "arb-strategy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arb-types = { path = "../arb-types" }
+arb-config = { path = "../arb-config" }
+rust_decimal = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }

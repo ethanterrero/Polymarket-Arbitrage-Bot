@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/arb-types",
+    "crates/arb-config",
+    "crates/arb-scanner",
+    "crates/arb-monitor",
+    "crates/arb-strategy",
+    "crates/arb-executor",
+    "crates/arb-risk",
+    "crates/arb-inventory",
+    "crates/arb-bot",
+]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+config = "0.14"
+dotenvy = "0.15"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+url = "2"

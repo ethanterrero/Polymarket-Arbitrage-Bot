@@ -1,0 +1,19 @@
+[package]
+name = "arb-bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arb-types = { path = "../arb-types" }
+arb-config = { path = "../arb-config" }
+arb-scanner = { path = "../arb-scanner" }
+arb-monitor = { path = "../arb-monitor" }
+arb-strategy = { path = "../arb-strategy" }
+arb-executor = { path = "../arb-executor" }
+arb-risk = { path = "../arb-risk" }
+arb-inventory = { path = "../arb-inventory" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+dotenvy = { workspace = true }

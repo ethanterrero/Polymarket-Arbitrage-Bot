@@ -1,0 +1,20 @@
+[package]
+name = "arb-monitor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arb-types = { path = "../arb-types" }
+arb-config = { path = "../arb-config" }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+url = { workspace = true }

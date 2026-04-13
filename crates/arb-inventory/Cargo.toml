@@ -1,0 +1,15 @@
+[package]
+name = "arb-inventory"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arb-types = { path = "../arb-types" }
+rust_decimal = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+rust_decimal_macros = { workspace = true }

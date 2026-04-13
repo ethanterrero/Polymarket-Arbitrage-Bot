@@ -1,0 +1,41 @@
+[polymarket]
+clob_url = "https://clob.polymarket.com"
+gamma_url = "https://gamma-api.polymarket.com"
+ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+chain_id = 137
+
+[strategy]
+min_net_spread = "0.005"
+base_fee_rate = "0.0"
+max_price_staleness_ms = 2000
+use_fok_orders = true
+mode = "simultaneous"
+max_sweep_levels = 5
+min_sweep_profit_usdc = "0.50"
+asymmetric_target_total_cost = "0.97"
+max_unpaired_hold_secs = 3600
+max_unpaired_exposure_usdc = "200.0"
+max_unpaired_legs_per_market = 3
+
+[risk]
+max_order_size_usdc = "50.0"
+max_total_exposure_usdc = "500.0"
+min_reserve_balance_usdc = "50.0"
+per_market_cooldown_secs = 10
+max_concurrent_positions = 10
+max_unpaired_exposure_usdc = "200.0"
+max_unpaired_per_market_usdc = "50.0"
+
+[scanner]
+refresh_interval_secs = 300
+max_markets = 200
+min_liquidity_usdc = "100.0"
+
+[monitor]
+use_websocket = true
+poll_interval_ms = 2000
+max_concurrent_requests = 20
+
+[logging]
+level = "info"
+json_output = false
