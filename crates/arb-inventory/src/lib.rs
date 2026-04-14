@@ -1,9 +1,9 @@
 use arb_types::{InventorySnapshot, OpenLeg, PairedPosition, Side};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 /// Manages unpaired leg inventory and pairing logic.
@@ -46,81 +46,95 @@ impl InventoryManager {
             Side::No => Side::Yes,
         };
 
-        let legs = state
-            .open_legs
-            .entry(condition_id.to_string())
-            .or_default();
+        // All work that touches `legs` (a mutable ref into `state.open_legs`) is
+        // scoped into this block. When the block ends, `legs` is dropped and the
+        // borrow on `state.open_legs` is released — making it safe to mutably
+        // access `state.paired_positions` afterwards.
+        let (new_pairs, remaining) = {
+            let legs = state
+                .open_legs
+                .entry(condition_id.to_string())
+                .or_default();
 
-        // Find opposite-side legs to pair with, sorted by avg_cost ascending.
-        let mut opposite_legs: Vec<usize> = legs
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.side == opposite)
-            .map(|(i, _)| i)
-            .collect();
-        opposite_legs.sort_by(|a, b| legs[*a].avg_cost.cmp(&legs[*b].avg_cost));
+            // Find opposite-side legs to pair with, sorted by avg_cost ascending.
+            let mut opposite_legs: Vec<usize> = legs
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.side == opposite)
+                .map(|(i, _)| i)
+                .collect();
+            opposite_legs.sort_by(|a, b| legs[*a].avg_cost.cmp(&legs[*b].avg_cost));
 
-        let mut remaining = fill_size;
-        let mut new_pairs = Vec::new();
-        let mut legs_to_reduce: Vec<(usize, Decimal)> = Vec::new();
+            let mut remaining = fill_size;
+            let mut new_pairs = Vec::new();
+            let mut legs_to_reduce: Vec<(usize, Decimal)> = Vec::new();
 
-        for &idx in &opposite_legs {
-            if remaining.is_zero() {
-                break;
+            for &idx in &opposite_legs {
+                if remaining.is_zero() {
+                    break;
+                }
+                let opp_leg = &legs[idx];
+                let pair_size = remaining.min(opp_leg.size);
+
+                let (yes_cost, no_cost) = match side {
+                    Side::Yes => (avg_cost * pair_size, opp_leg.avg_cost * pair_size),
+                    Side::No => (opp_leg.avg_cost * pair_size, avg_cost * pair_size),
+                };
+
+                let locked_profit = pair_size - yes_cost - no_cost;
+
+                let paired = PairedPosition {
+                    id: Uuid::new_v4(),
+                    condition_id: condition_id.to_string(),
+                    paired_size: pair_size,
+                    yes_cost,
+                    no_cost,
+                    locked_profit,
+                    paired_at: Utc::now(),
+                };
+
+                info!(
+                    condition_id = %condition_id,
+                    paired_size = %pair_size,
+                    locked_profit = %locked_profit,
+                    "Legs paired"
+                );
+
+                new_pairs.push(paired);
+                legs_to_reduce.push((idx, pair_size));
+                remaining -= pair_size;
             }
-            let opp_leg = &legs[idx];
-            let pair_size = remaining.min(opp_leg.size);
 
-            let (yes_cost, no_cost) = match side {
-                Side::Yes => (avg_cost * pair_size, opp_leg.avg_cost * pair_size),
-                Side::No => (opp_leg.avg_cost * pair_size, avg_cost * pair_size),
-            };
-
-            let locked_profit = pair_size - yes_cost - no_cost;
-
-            let paired = PairedPosition {
-                id: Uuid::new_v4(),
-                condition_id: condition_id.to_string(),
-                paired_size: pair_size,
-                yes_cost,
-                no_cost,
-                locked_profit,
-                paired_at: Utc::now(),
-            };
-
-            info!(
-                condition_id = %condition_id,
-                paired_size = %pair_size,
-                locked_profit = %locked_profit,
-                "Legs paired"
-            );
-
-            new_pairs.push(paired.clone());
-            state.paired_positions.push(paired);
-
-            legs_to_reduce.push((idx, pair_size));
-            remaining -= pair_size;
-        }
-
-        // Reduce or remove paired opposite legs (process in reverse to keep indices valid).
-        for (idx, consumed) in legs_to_reduce.into_iter().rev() {
-            legs[idx].size -= consumed;
-            if legs[idx].size.is_zero() {
-                legs.remove(idx);
+            // Reduce or remove paired opposite legs (process in reverse to keep indices valid).
+            for (idx, consumed) in legs_to_reduce.into_iter().rev() {
+                legs[idx].size -= consumed;
+                if legs[idx].size.is_zero() {
+                    legs.remove(idx);
+                }
             }
-        }
 
-        // Any remaining fill becomes a new open leg.
+            (new_pairs, remaining)
+            // `legs` is dropped here — borrow on `state.open_legs` is released.
+        };
+
+        // Safe now: `state.open_legs` borrow is gone, so we can touch `paired_positions`.
+        state.paired_positions.extend(new_pairs.clone());
+
+        // Any remaining fill becomes a new open leg — re-borrow open_legs fresh.
         if remaining > Decimal::ZERO {
-            legs.push(OpenLeg {
-                id: Uuid::new_v4(),
-                condition_id: condition_id.to_string(),
-                token_id: token_id.to_string(),
-                side,
-                size: remaining,
-                avg_cost,
-                acquired_at: Utc::now(),
-            });
+            state
+                .open_legs
+                .entry(condition_id.to_string())
+                .or_default()
+                .push(OpenLeg {
+                    id: Uuid::new_v4(),
+                    condition_id: condition_id.to_string(),
+                    token_id: token_id.to_string(),
+                    side,
+                    size: remaining,
+                    avg_cost,
+                    acquired_at: Utc::now(),
+                });
         }
 
         new_pairs
