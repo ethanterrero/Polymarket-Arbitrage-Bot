@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
 
     // Initialize components.
     let scanner = Arc::new(MarketScanner::new(&config));
-    let monitor = PriceMonitor::new(&config);
+    let monitor = Arc::new(PriceMonitor::new(&config));
     let detector = ArbitrageDetector::new(&config.strategy);
     let risk_manager = Arc::new(RiskManager::new(&config.risk));
     let inventory = Arc::new(InventoryManager::new(config.strategy.max_unpaired_hold_secs));
@@ -115,10 +115,15 @@ async fn main() -> Result<()> {
 
     // Spawn periodic balance check.
     let risk_for_balance = risk_manager.clone();
+    let monitor_for_balance = monitor.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
+            match monitor_for_balance.fetch_balance().await {
+                Ok(fetched) => risk_for_balance.update_balance(fetched).await,
+                Err(e) => warn!(error = %e, "Failed to fetch balance from CLOB"),
+            }
             let balance = risk_for_balance.balance().await;
             let exposure = risk_for_balance.total_exposure().await;
             info!(

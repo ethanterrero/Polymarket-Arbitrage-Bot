@@ -28,6 +28,10 @@ pub struct PolymarketConfig {
     pub gamma_url: String,
     pub ws_url: String,
     pub chain_id: u64,
+    /// Wallet address used to fetch USDC balance from the CLOB.
+    /// Leave empty to skip live balance checks (bot runs with balance = 0).
+    #[serde(default)]
+    pub wallet_address: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,6 +102,10 @@ pub struct ScannerConfig {
     pub refresh_interval_secs: u64,
     pub max_markets: usize,
     pub min_liquidity_usdc: Decimal,
+    /// If non-empty, only include markets whose question contains at least one of these keywords (case-insensitive).
+    /// Leave empty to scan all markets.
+    #[serde(default)]
+    pub market_keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

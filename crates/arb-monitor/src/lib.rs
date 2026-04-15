@@ -21,6 +21,15 @@ pub enum MonitorError {
     Parse(String),
 }
 
+/// Response from the CLOB `/balance` endpoint.
+#[derive(Debug, Deserialize)]
+struct ClobBalanceResponse {
+    balance: Option<String>,
+    #[serde(rename = "USDCBalance")]
+    usdc_balance: Option<String>,
+    // Some CLOB versions return a plain string — serde will try both fields.
+}
+
 /// Raw orderbook response from the CLOB REST API.
 #[derive(Debug, Deserialize)]
 struct ClobBookResponse {
@@ -337,6 +346,20 @@ impl PriceMonitor {
         }
 
         Ok(())
+    }
+
+    /// Fetch the current USDC balance from the CLOB REST API.
+    pub async fn fetch_balance(&self) -> Result<Decimal, MonitorError> {
+        let url = format!("{}/balance", self.clob_url);
+        let resp: ClobBalanceResponse = self.client.get(&url).send().await?.json().await?;
+
+        let raw = resp
+            .usdc_balance
+            .or(resp.balance)
+            .ok_or_else(|| MonitorError::Parse("No balance field in response".to_string()))?;
+
+        Decimal::from_str(&raw)
+            .map_err(|e| MonitorError::Parse(format!("Invalid balance value '{raw}': {e}")))
     }
 
     /// Start monitoring — dispatches to REST or WebSocket based on config.
