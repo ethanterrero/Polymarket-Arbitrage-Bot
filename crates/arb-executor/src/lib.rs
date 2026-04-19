@@ -551,6 +551,7 @@ mod tests {
                 gamma_url: "https://gamma-api.polymarket.com".to_string(),
                 ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
                 chain_id: 137,
+                wallet_address: String::new(),
             },
             strategy: arb_config::StrategyConfig {
                 min_net_spread: dec!(0.005),
@@ -578,6 +579,7 @@ mod tests {
                 refresh_interval_secs: 300,
                 max_markets: 200,
                 min_liquidity_usdc: dec!(100),
+                market_keywords: Vec::new(),
             },
             monitor: arb_config::MonitorConfig {
                 use_websocket: true,
