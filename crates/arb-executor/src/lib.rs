@@ -1,18 +1,23 @@
+pub mod auth;
+
 use arb_config::AppConfig;
 use arb_types::{ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, SweepExecutionOrder};
+use auth::ApiCredentials;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutorError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("serialization error: {0}")]
+    Json(#[from] serde_json::Error),
     #[error("API error: {status} — {body}")]
     Api { status: u16, body: String },
-    #[error("Authentication not configured: {0}")]
-    AuthNotConfigured(String),
+    #[error("auth error: {0}")]
+    Auth(String),
     #[error("Order rejected: {0}")]
     OrderRejected(String),
 }
@@ -56,11 +61,7 @@ pub struct OrderExecutor {
     client: reqwest::Client,
     clob_url: String,
     dry_run: bool,
-    /// API credentials (derived from private key via EIP-712 signing).
-    /// None = dry-run only.
-    api_key: Option<String>,
-    api_secret: Option<String>,
-    api_passphrase: Option<String>,
+    creds: Option<ApiCredentials>,
 }
 
 impl OrderExecutor {
@@ -70,30 +71,38 @@ impl OrderExecutor {
             client: reqwest::Client::new(),
             clob_url: config.polymarket.clob_url.clone(),
             dry_run: true,
-            api_key: None,
-            api_secret: None,
-            api_passphrase: None,
+            creds: None,
         }
     }
 
-    /// Create an executor with API credentials for live trading.
+    /// Derive API credentials from `private_key_hex` and return a live executor.
     ///
-    /// In production, derive these from the private key using the CLOB's
-    /// `POST /auth/derive-api-key` endpoint with EIP-712 signing.
-    pub fn new_authenticated(
+    /// Calls `POST /auth/derive-api-key` on the CLOB with an EIP-712 signed
+    /// proof of wallet ownership. Errors if the network call fails or the key
+    /// is malformed.
+    pub async fn new_live(
         config: &AppConfig,
-        api_key: String,
-        api_secret: String,
-        api_passphrase: String,
-    ) -> Self {
-        Self {
-            client: reqwest::Client::new(),
+        private_key_hex: &str,
+    ) -> Result<Self, auth::AuthError> {
+        let client = reqwest::Client::new();
+        let creds = auth::derive_api_key(
+            &client,
+            &config.polymarket.clob_url,
+            private_key_hex,
+            config.polymarket.chain_id,
+        )
+        .await?;
+        info!(
+            wallet = %creds.wallet_address,
+            api_key = %creds.api_key,
+            "API key derived — live trading enabled"
+        );
+        Ok(Self {
+            client,
             clob_url: config.polymarket.clob_url.clone(),
             dry_run: false,
-            api_key: Some(api_key),
-            api_secret: Some(api_secret),
-            api_passphrase: Some(api_passphrase),
-        }
+            creds: Some(creds),
+        })
     }
 
     /// Execute an arbitrage order (buy YES + buy NO concurrently).
@@ -112,7 +121,7 @@ impl OrderExecutor {
         }
 
         // Verify authentication is available.
-        if self.api_key.is_none() {
+        if self.creds.is_none() {
             return ExecutionResult::Error {
                 error: "API credentials not configured".to_string(),
                 order,
@@ -261,7 +270,7 @@ impl OrderExecutor {
     ) -> Result<ClobOrderResponse, ExecutorError> {
         let url = format!("{}/order", self.clob_url);
 
-        let body = ClobOrderRequest {
+        let req_body = ClobOrderRequest {
             token_id: token_id.to_string(),
             price: price.to_string(),
             size: size.to_string(),
@@ -269,41 +278,23 @@ impl OrderExecutor {
             order_type: order_type.clone(),
         };
 
+        // Serialize once so the same bytes go into both the HMAC and the request body.
+        let body_json = serde_json::to_string(&req_body)?;
+
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        // Add authentication headers.
-        // In production, these would include HMAC-signed headers per the CLOB spec:
-        //   POLY_ADDRESS, POLY_SIGNATURE, POLY_TIMESTAMP, POLY_NONCE, POLY_API_KEY, POLY_PASSPHRASE
-        if let (Some(key), Some(_secret), Some(passphrase)) =
-            (&self.api_key, &self.api_secret, &self.api_passphrase)
-        {
-            headers.insert(
-                "POLY_API_KEY",
-                HeaderValue::from_str(key).unwrap_or(HeaderValue::from_static("")),
-            );
-            headers.insert(
-                "POLY_PASSPHRASE",
-                HeaderValue::from_str(passphrase).unwrap_or(HeaderValue::from_static("")),
-            );
-            let timestamp = chrono::Utc::now().timestamp().to_string();
-            headers.insert(
-                "POLY_TIMESTAMP",
-                HeaderValue::from_str(&timestamp).unwrap_or(HeaderValue::from_static("0")),
-            );
-
-            // NOTE: Full HMAC signing implementation would go here.
-            // The actual signature computation depends on the CLOB's L2 auth spec:
-            //   signature = HMAC-SHA256(secret, timestamp + method + path + body)
-            // This is left as a TODO for when the wallet is funded and API key is derived.
-            debug!("HMAC signing placeholder — full implementation needed for live trading");
+        if let Some(creds) = &self.creds {
+            let auth_headers = auth::build_auth_headers(creds, "POST", "/order", &body_json)
+                .map_err(|e| ExecutorError::Auth(e.to_string()))?;
+            headers.extend(auth_headers);
         }
 
         let resp = self
             .client
             .post(&url)
             .headers(headers)
-            .json(&body)
+            .body(body_json)
             .send()
             .await?;
 
@@ -359,7 +350,7 @@ impl OrderExecutor {
             return ExecutionResult::DryRun { order: exec_order };
         }
 
-        if self.api_key.is_none() {
+        if self.creds.is_none() {
             let exec_order = ExecutionOrder {
                 opportunity: arb_types::ArbitrageOpportunity {
                     id: order.opportunity.id,
@@ -499,7 +490,7 @@ impl OrderExecutor {
             return LegExecutionResult::DryRun { order };
         }
 
-        if self.api_key.is_none() {
+        if self.creds.is_none() {
             return LegExecutionResult::Error {
                 error: "API credentials not configured".to_string(),
                 order,
