@@ -43,12 +43,18 @@ async fn main() -> Result<()> {
 
     // Determine execution mode.
     let executor = match AppConfig::load_private_key() {
-        Ok(_key) => {
-            info!("Private key found, but using DRY RUN mode until API key derivation is implemented");
-            Arc::new(OrderExecutor::new_dry_run(&config))
-        }
+        Ok(key) => match OrderExecutor::new_live(&config, &key).await {
+            Ok(exec) => {
+                info!("Live trading enabled");
+                Arc::new(exec)
+            }
+            Err(e) => {
+                warn!(error = %e, "API key derivation failed — falling back to dry-run");
+                Arc::new(OrderExecutor::new_dry_run(&config))
+            }
+        },
         Err(_) => {
-            info!("No private key found — running in DETECT-ONLY mode");
+            info!("No private key found — running in dry-run mode");
             Arc::new(OrderExecutor::new_dry_run(&config))
         }
     };

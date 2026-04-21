@@ -30,3 +30,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
 url = "2"
+hmac = "0.12"
+sha2 = "0.10"
+sha3 = "0.10"
+base64 = "0.22"
+k256 = { version = "0.13", features = ["ecdsa"] }
+hex = "0.4"
