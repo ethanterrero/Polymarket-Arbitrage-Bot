@@ -86,3 +86,97 @@ EIP-712 is a standard for signing structured data in Ethereum wallets. Before it
 - `cargo test --workspace` — all 23 tests pass
 - Live trading is now reachable: set `POLYMARKET_PRIVATE_KEY=0x...` and the bot derives an API key on startup and signs real orders
 - Next: add `execution.mode = dry_run | live` config flag so live trading requires explicit opt-in (can't be triggered by env var presence alone)
+
+---
+
+## 2026-04-21
+
+### What we did
+Scoped the real next blocker for live trading, then landed the cryptographic core of it: EIP-712 signing for Polymarket CTF Exchange orders. Pinned it against Polymarket's own published test vectors so we know the bytes are correct before we ever touch the network.
+
+### Why this was needed
+The auth work on 2026-04-20 got us past the *request* authentication layer — the `POLY_*` HMAC headers that prove "this HTTP request is from an authenticated API client." But the Polymarket CLOB requires a second, independent signature on the *order itself*: a structured EIP-712 signature over the order fields (tokenId, amounts, side, expiration, etc.) using the wallet's private key. Without it, the CLOB rejects orders even with valid HMAC headers. Our old `ClobOrderRequest` was a 5-field JSON blob — nowhere near the full signed Order struct the exchange expects.
+
+### Research first
+Before writing any code, spent real effort finding exact references in Polymarket's open-source repos:
+- `Polymarket/ctf-exchange` — the on-chain Solidity contract (source of truth for the struct layout and typehash)
+- `Polymarket/python-order-utils` — signing library with **published test vectors**
+- `Polymarket/rs-clob-client` — Polymarket's own Rust client (confirms wire format, contract addresses, price→amount math)
+
+The test vectors were the key find. They let us verify a pure cryptographic implementation deterministically, offline, before touching anything networked.
+
+### The Order struct
+Polymarket orders hashed under EIP-712 have this exact layout (from `OrderStructs.sol`):
+
+```
+Order(
+    uint256 salt,
+    address maker,        // funded account — proxy wallet for most users
+    address signer,       // the EOA that holds the key
+    address taker,        // 0x000...000 = public order (normal case)
+    uint256 tokenId,      // the CLOB outcome token (YES or NO side)
+    uint256 makerAmount,  // what you pay (USDC-scaled integer, 6 decimals)
+    uint256 takerAmount,  // what you receive (tokens, same scale)
+    uint256 expiration,   // unix seconds, 0 = GTC
+    uint256 nonce,        // on-chain cancel nonce, usually 0
+    uint256 feeRateBps,   // per-market, fetched from /fee-rate
+    uint8   side,         // 0=BUY, 1=SELL
+    uint8   signatureType // 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
+)
+```
+
+The full signing chain:
+```
+orderTypeHash     = keccak256("Order(uint256 salt,address maker,...)")
+structHash        = keccak256(abi.encode(orderTypeHash, ...fields))
+domainSeparator   = keccak256(abi.encode(
+                        domainTypeHash,
+                        keccak256("Polymarket CTF Exchange"),
+                        keccak256("1"),
+                        chainId,
+                        verifyingContract))
+digest            = keccak256("\x19\x01" || domainSeparator || structHash)
+signature         = secp256k1_sign(privateKey, digest) → r || s || v
+```
+
+### Two exchanges, not one
+Polymarket actually runs two CTF Exchange contracts on Polygon: the standard one (`0x4bFb4…8982E`) and a **Neg Risk** variant (`0xC5d56…20f80a`) for markets with linked outcomes. Which one signs your order depends on a `neg_risk` flag that comes from the market metadata. The EIP-712 domain name and version are identical — only the `verifyingContract` differs — which means the signature produced for one contract is *not* valid at the other. Getting this wrong would cause all orders on ~half of all markets to silently fail.
+
+### New code
+- **`crates/arb-executor/src/order_signing.rs`** — new module, ~280 lines, pure cryptographic logic with zero network or filesystem side effects:
+  - `Order` struct mirroring the Solidity layout exactly
+  - `OrderSide` (Buy/Sell) and `SignatureType` (Eoa/PolyProxy/PolyGnosisSafe) enums
+  - `order_struct_hash` — keccak256 over ABI-encoded fields
+  - `domain_separator` — per-chain, per-exchange
+  - `order_digest` — the final 32-byte ECDSA input
+  - `sign_order` — returns `r || s || v` as 65 bytes with v ∈ {27, 28}
+  - `contracts` submodule with canonical addresses for Polygon mainnet + Amoy testnet, for both exchange flavors
+- **`crates/arb-executor/src/lib.rs`** — wired the new module with `pub mod order_signing;`
+- **`Cargo.toml`** — added `primitive-types = "0.12"` for `U256` and `H160`. Our existing `auth.rs` hand-rolled its own 32-byte big-endian encoding; for orders we need real `uint256` math because token IDs can be ~77-digit numbers that won't fit in `u64`.
+
+### Tests that actually prove it works
+Three unit tests, all using the Anvil test key and inputs lifted verbatim from `python-order-utils/tests/test_order_builder.py`:
+
+1. **`amoy_reference_vector_digest`** — feeds a known order into our digest function, expects the 32-byte value `0x02ca1d1aa31103804173ad1acd70066cb6c1258a4be6dada055111f9a7ea4e55`. This catches any bug in the domain hash, typehash, field ordering, or ABI encoding.
+2. **`amoy_neg_risk_reference_vector_digest`** — same inputs, different `verifyingContract`, expects `0xf15790d3…`. Proves the neg-risk routing works.
+3. **`amoy_reference_vector_signature`** — runs the full sign path end-to-end. Expects the exact 65-byte signature `0x302cd9ab…1c`. Catches any bug in ECDSA signing or v-byte encoding.
+
+All three pass. Because the inputs and expected outputs were produced by Polymarket's own library, passing these tests means our signatures are byte-identical to what their official clients would produce.
+
+### Concept learned: deterministic test vectors as a cross-check
+A reference vector is a "known input → known output" pair published by a trusted source (here, the upstream project's own test suite). For cryptographic code, reference vectors are uniquely powerful: the output is sensitive to every single bit of the input, so if you produce the expected bytes, the odds of having a subtle bug are essentially zero. It's very different from "our test passed" for a regular unit test — it's "we computed the same thing the reference implementation did." Always look for these when implementing a spec that someone else has already implemented.
+
+### State after today
+- `cargo test --workspace` — all tests pass, including the 3 new cryptographic reference-vector tests
+- Pure cryptographic layer for order signing is done and verified
+- Branch: `feat/eip712-order-signing` (not yet pushed)
+- **The bot still can't place live orders yet** — signing produces correct bytes, but those bytes aren't yet being attached to anything sent to the CLOB. That's the wiring task next.
+
+### What's next (in order)
+1. **CREATE2 proxy/safe derivation** — given an EOA, deterministically compute the Polymarket proxy address used as `maker`. No HTTP call needed — pure address arithmetic with known vectors.
+2. **BinaryMarket metadata plumbing** — add `neg_risk`, `fee_rate_bps`, `min_tick_size` fields; update the scanner to parse them from the Gamma API.
+3. **Price/size → makerAmount/takerAmount math** — matching `rs-clob-client`'s quantization (truncate to 6 decimals, USDC-scale).
+4. **Rewrite the `/order` request body** — salt as a JSON number (must fit in u53), amounts as decimal strings, side as `"BUY"`/`"SELL"` at the wire layer, `owner` = API key UUID. Wrap the signed Order + orderType + owner into the shape the CLOB actually expects.
+5. **Wiremock integration test** — assert the full POSTed request body matches what a real Polymarket client would send, byte-for-byte on the order fields.
+6. **Startup allowance check** — verify USDC and CTF approvals to the exchange before enabling live mode; fail loudly if missing.
+
