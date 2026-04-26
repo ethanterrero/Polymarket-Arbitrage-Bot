@@ -12,8 +12,9 @@ use order_signing::{Order, OrderSide, SignatureType};
 use primitive_types::{H160, U256};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Signed order payload for the CLOB API.
 #[derive(Debug, Serialize)]
@@ -88,6 +89,7 @@ pub struct OrderExecutor {
     client: reqwest::Client,
     clob_url: String,
     dry_run: bool,
+    chain_id: u64,
     creds: Option<ApiCredentials>,
     signing_key: Option<SigningKey>,
     signature_type: SignatureType,
@@ -100,6 +102,7 @@ impl OrderExecutor {
             client: reqwest::Client::new(),
             clob_url: config.polymarket.clob_url.clone(),
             dry_run: true,
+            chain_id: config.polymarket.chain_id,
             creds: None,
             signing_key: None,
             signature_type: SignatureType::Eoa,
@@ -149,6 +152,7 @@ impl OrderExecutor {
             client,
             clob_url: config.polymarket.clob_url.clone(),
             dry_run: false,
+            chain_id: config.polymarket.chain_id,
             creds: Some(creds),
             signing_key: Some(signing_key),
             signature_type,
@@ -364,13 +368,7 @@ impl OrderExecutor {
             ExecutorError::Auth("Signing key not configured (live executor required)".to_string())
         })?;
 
-        // NOTE: chain id should come from config; the executor doesn't retain it today.
-        // We allow override for tests / non-polygon via env.
-        let chain_id: u64 = std::env::var("POLYMARKET_CHAIN_ID")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(order_signing::contracts::POLYGON_CHAIN_ID);
-
+        let chain_id = self.chain_id;
         let verifying = order_signing::contracts::verifying_contract(chain_id, market.neg_risk)
             .ok_or_else(|| ExecutorError::Auth(format!("Unsupported chain_id: {}", chain_id)))?;
         let verifying_h160 = order_signing::parse_address(verifying)
@@ -518,12 +516,14 @@ impl OrderExecutor {
         };
 
         let yes_future = self.place_order(
+            &order.opportunity.market,
             &order.opportunity.market.yes_token_id,
             order.yes_limit_price,
             order.approved_size,
             &order_type,
         );
         let no_future = self.place_order(
+            &order.opportunity.market,
             &order.opportunity.market.no_token_id,
             order.no_limit_price,
             order.approved_size,
@@ -719,6 +719,10 @@ fn decimal_to_u256_scaled(value: Decimal, scale: u32) -> Result<U256, ExecutorEr
 mod tests {
     use super::*;
     use arb_types::{ArbitrageOpportunity, BinaryMarket};
+    use base64::Engine;
+    use httpmock::Method::POST;
+    use httpmock::MockServer;
+    use k256::ecdsa::SigningKey;
     use rust_decimal_macros::dec;
     use uuid::Uuid;
 
@@ -813,5 +817,86 @@ mod tests {
 
         let result = executor.execute(order).await;
         assert!(matches!(result, ExecutionResult::DryRun { .. }));
+    }
+
+    #[tokio::test]
+    async fn live_place_order_sends_signed_body_and_auth_headers() {
+        let server = MockServer::start();
+
+        // Minimal successful response shape.
+        let m = server.mock(|when, then| {
+            when.method(POST).path("/order");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"success":true,"order_id":"abc"}"#);
+        });
+
+        // Deterministic signing key.
+        let key_bytes =
+            hex::decode("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+                .unwrap();
+        let signing_key = SigningKey::from_bytes(key_bytes.as_slice().into()).unwrap();
+
+        // Deterministic creds (auth headers use api_secret; make it decodable base64url).
+        let secret = base64::engine::general_purpose::URL_SAFE.encode(b"test-secret-key-32-bytes-padding");
+        let creds = ApiCredentials {
+            api_key: "test-owner-api-key".to_string(),
+            api_secret: secret,
+            api_passphrase: "pass".to_string(),
+            wallet_address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string(),
+        };
+
+        let market = BinaryMarket {
+            condition_id: "cond".to_string(),
+            yes_token_id: "1234".to_string(),
+            no_token_id: "5678".to_string(),
+            question: "q".to_string(),
+            slug: "s".to_string(),
+            active: true,
+            liquidity: None,
+            neg_risk: false,
+            fee_rate_bps: 12,
+            min_tick_size: dec!(0.01),
+        };
+
+        let exec = OrderExecutor {
+            client: reqwest::Client::new(),
+            clob_url: server.url(""),
+            dry_run: false,
+            chain_id: order_signing::contracts::POLYGON_CHAIN_ID,
+            creds: Some(creds),
+            signing_key: Some(signing_key),
+            signature_type: SignatureType::Eoa,
+        };
+
+        // Force deterministic timestamp + salt so auth signature is stable.
+        let (body, headers) = exec
+            .build_signed_order_http_request(
+                &market,
+                &market.yes_token_id,
+                dec!(0.45),
+                dec!(10.0),
+                &OrderType::Gtc,
+                Some("1700000000"),
+                Some(42),
+            )
+            .unwrap();
+
+        // Quick sanity: body contains expected top-level keys.
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v.get("order").is_some());
+        assert_eq!(v["owner"], "test-owner-api-key");
+
+        let resp = exec
+            .client
+            .post(format!("{}/order", exec.clob_url))
+            .headers(headers)
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+
+        m.assert();
     }
 }

@@ -26,3 +26,4 @@ primitive-types = { workspace = true }
 
 [dev-dependencies]
 rust_decimal_macros = { workspace = true }
+httpmock = "0.8.3"
