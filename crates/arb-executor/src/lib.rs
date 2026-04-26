@@ -3,12 +3,45 @@ pub mod order_signing;
 pub mod proxy_address;
 
 use arb_config::AppConfig;
-use arb_types::{ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, SweepExecutionOrder};
+use arb_types::{
+    BinaryMarket, ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, SweepExecutionOrder,
+};
 use auth::ApiCredentials;
+use k256::ecdsa::SigningKey;
+use order_signing::{Order, OrderSide, SignatureType};
+use primitive_types::{H160, U256};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, warn};
+
+/// Signed order payload for the CLOB API.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClobSignedOrder {
+    /// Must be a JSON number that fits in u53.
+    salt: u64,
+    maker: String,
+    signer: String,
+    taker: String,
+    token_id: String,
+    maker_amount: String,
+    taker_amount: String,
+    expiration: String,
+    nonce: String,
+    fee_rate_bps: String,
+    side: String,
+    signature_type: u8,
+    signature: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClobPlaceOrderRequest {
+    order: ClobSignedOrder,
+    order_type: OrderType,
+    owner: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutorError {
@@ -32,15 +65,7 @@ pub enum OrderType {
     Gtc,
 }
 
-/// Order request body for the CLOB API.
-#[derive(Debug, Serialize)]
-struct ClobOrderRequest {
-    token_id: String,
-    price: String,
-    size: String,
-    side: String,
-    order_type: OrderType,
-}
+// NOTE: `ClobOrderRequest` (unsigned) was replaced by `ClobPlaceOrderRequest` (signed).
 
 /// Response from the CLOB order endpoint.
 #[derive(Debug, Deserialize)]
@@ -64,6 +89,8 @@ pub struct OrderExecutor {
     clob_url: String,
     dry_run: bool,
     creds: Option<ApiCredentials>,
+    signing_key: Option<SigningKey>,
+    signature_type: SignatureType,
 }
 
 impl OrderExecutor {
@@ -74,6 +101,8 @@ impl OrderExecutor {
             clob_url: config.polymarket.clob_url.clone(),
             dry_run: true,
             creds: None,
+            signing_key: None,
+            signature_type: SignatureType::Eoa,
         }
     }
 
@@ -87,6 +116,23 @@ impl OrderExecutor {
         private_key_hex: &str,
     ) -> Result<Self, auth::AuthError> {
         let client = reqwest::Client::new();
+        let key_bytes = hex::decode(private_key_hex.trim_start_matches("0x"))?;
+        let signing_key = SigningKey::from_bytes(key_bytes.as_slice().into())?;
+
+        let signature_type = match std::env::var("POLYMARKET_SIGNATURE_TYPE")
+            .unwrap_or_else(|_| "eoa".to_string())
+            .to_lowercase()
+            .as_str()
+        {
+            "eoa" => SignatureType::Eoa,
+            "poly_proxy" | "proxy" => SignatureType::PolyProxy,
+            "poly_gnosis_safe" | "safe" => SignatureType::PolyGnosisSafe,
+            other => {
+                warn!(value = other, "Unknown POLYMARKET_SIGNATURE_TYPE; defaulting to eoa");
+                SignatureType::Eoa
+            }
+        };
+
         let creds = auth::derive_api_key(
             &client,
             &config.polymarket.clob_url,
@@ -104,6 +150,8 @@ impl OrderExecutor {
             clob_url: config.polymarket.clob_url.clone(),
             dry_run: false,
             creds: Some(creds),
+            signing_key: Some(signing_key),
+            signature_type,
         })
     }
 
@@ -146,6 +194,7 @@ impl OrderExecutor {
 
         // Place both legs concurrently.
         let yes_future = self.place_order(
+            &order.opportunity.market,
             &order.opportunity.market.yes_token_id,
             order.yes_price,
             order.approved_size,
@@ -153,6 +202,7 @@ impl OrderExecutor {
         );
 
         let no_future = self.place_order(
+            &order.opportunity.market,
             &order.opportunity.market.no_token_id,
             order.no_price,
             order.approved_size,
@@ -265,32 +315,15 @@ impl OrderExecutor {
     /// Place a single buy order on the CLOB.
     async fn place_order(
         &self,
+        market: &BinaryMarket,
         token_id: &str,
         price: Decimal,
         size: Decimal,
         order_type: &OrderType,
     ) -> Result<ClobOrderResponse, ExecutorError> {
         let url = format!("{}/order", self.clob_url);
-
-        let req_body = ClobOrderRequest {
-            token_id: token_id.to_string(),
-            price: price.to_string(),
-            size: size.to_string(),
-            side: "BUY".to_string(),
-            order_type: order_type.clone(),
-        };
-
-        // Serialize once so the same bytes go into both the HMAC and the request body.
-        let body_json = serde_json::to_string(&req_body)?;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-
-        if let Some(creds) = &self.creds {
-            let auth_headers = auth::build_auth_headers(creds, "POST", "/order", &body_json)
-                .map_err(|e| ExecutorError::Auth(e.to_string()))?;
-            headers.extend(auth_headers);
-        }
+        let (body_json, headers) =
+            self.build_signed_order_http_request(market, token_id, price, size, order_type, None, None)?;
 
         let resp = self
             .client
@@ -311,6 +344,106 @@ impl OrderExecutor {
 
         let order_resp: ClobOrderResponse = resp.json().await?;
         Ok(order_resp)
+    }
+
+    fn build_signed_order_http_request(
+        &self,
+        market: &BinaryMarket,
+        token_id: &str,
+        price: Decimal,
+        size: Decimal,
+        order_type: &OrderType,
+        fixed_timestamp: Option<&str>,
+        fixed_salt: Option<u64>,
+    ) -> Result<(String, HeaderMap), ExecutorError> {
+        let creds = self
+            .creds
+            .as_ref()
+            .ok_or_else(|| ExecutorError::Auth("API credentials not configured".to_string()))?;
+        let signing_key = self.signing_key.as_ref().ok_or_else(|| {
+            ExecutorError::Auth("Signing key not configured (live executor required)".to_string())
+        })?;
+
+        // NOTE: chain id should come from config; the executor doesn't retain it today.
+        // We allow override for tests / non-polygon via env.
+        let chain_id: u64 = std::env::var("POLYMARKET_CHAIN_ID")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(order_signing::contracts::POLYGON_CHAIN_ID);
+
+        let verifying = order_signing::contracts::verifying_contract(chain_id, market.neg_risk)
+            .ok_or_else(|| ExecutorError::Auth(format!("Unsupported chain_id: {}", chain_id)))?;
+        let verifying_h160 = order_signing::parse_address(verifying)
+            .map_err(|e| ExecutorError::Auth(e.to_string()))?;
+
+        let signer: H160 = order_signing::parse_address(&creds.wallet_address)
+            .map_err(|e| ExecutorError::Auth(e.to_string()))?;
+        let signature_type = self.signature_type;
+        let maker = proxy_address::derive_maker_address(signer, signature_type);
+
+        let (q_price, q_size) = quantize_price_and_size(price, size, market.min_tick_size)?;
+        let maker_amount = decimal_to_u256_scaled(q_price * q_size, 6)?;
+        let taker_amount = decimal_to_u256_scaled(q_size, 6)?;
+
+        let token_u256 = U256::from_dec_str(token_id.trim()).map_err(|_| {
+            ExecutorError::OrderRejected(format!("invalid token_id (not a uint256): {}", token_id))
+        })?;
+
+        let salt = fixed_salt.unwrap_or_else(make_salt_u53);
+
+        let order = Order {
+            salt: U256::from(salt),
+            maker,
+            signer,
+            taker: H160::zero(),
+            token_id: token_u256,
+            maker_amount,
+            taker_amount,
+            expiration: U256::zero(),
+            nonce: U256::zero(),
+            fee_rate_bps: U256::from(market.fee_rate_bps),
+            side: OrderSide::Buy,
+            signature_type,
+        };
+
+        let sig = order_signing::sign_order(signing_key, &order, chain_id, verifying_h160)
+            .map_err(|e| ExecutorError::Auth(e.to_string()))?;
+        let sig_hex = format!("0x{}", hex::encode(sig));
+
+        let req_body = ClobPlaceOrderRequest {
+            order: ClobSignedOrder {
+                salt,
+                maker: format!("0x{}", hex::encode(maker.as_bytes())),
+                signer: creds.wallet_address.clone(),
+                taker: "0x0000000000000000000000000000000000000000".to_string(),
+                token_id: token_id.to_string(),
+                maker_amount: maker_amount.to_string(),
+                taker_amount: taker_amount.to_string(),
+                expiration: "0".to_string(),
+                nonce: "0".to_string(),
+                fee_rate_bps: market.fee_rate_bps.to_string(),
+                side: "BUY".to_string(),
+                signature_type: signature_type as u8,
+                signature: sig_hex,
+            },
+            order_type: order_type.clone(),
+            owner: creds.api_key.clone(),
+        };
+
+        let body_json = serde_json::to_string(&req_body)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+
+        let auth_headers = if let Some(ts) = fixed_timestamp {
+            auth::build_auth_headers_at(creds, "POST", "/order", &body_json, ts)
+        } else {
+            auth::build_auth_headers(creds, "POST", "/order", &body_json)
+        }
+        .map_err(|e| ExecutorError::Auth(e.to_string()))?;
+        headers.extend(auth_headers);
+
+        Ok((body_json, headers))
     }
 
     /// Execute a multi-level sweep (buy YES + buy NO at worst prices to sweep levels).
@@ -505,8 +638,21 @@ impl OrderExecutor {
             OrderType::Gtc
         };
 
+        let market = BinaryMarket {
+            condition_id: order.condition_id.clone(),
+            yes_token_id: String::new(),
+            no_token_id: String::new(),
+            question: String::new(),
+            slug: String::new(),
+            active: true,
+            liquidity: None,
+            neg_risk: order.neg_risk,
+            fee_rate_bps: order.fee_rate_bps,
+            min_tick_size: order.min_tick_size,
+        };
+
         match self
-            .place_order(&order.token_id, order.target_price, order.size, &order_type)
+            .place_order(&market, &order.token_id, order.target_price, order.size, &order_type)
             .await
         {
             Ok(resp) => {
@@ -528,6 +674,45 @@ impl OrderExecutor {
             },
         }
     }
+}
+
+fn make_salt_u53() -> u64 {
+    let ms = chrono::Utc::now().timestamp_millis() as u64;
+    ms & ((1u64 << 53) - 1)
+}
+
+fn quantize_price_and_size(
+    price: Decimal,
+    size: Decimal,
+    tick: Decimal,
+) -> Result<(Decimal, Decimal), ExecutorError> {
+    if tick <= Decimal::ZERO {
+        return Err(ExecutorError::OrderRejected(
+            "min_tick_size must be > 0".to_string(),
+        ));
+    }
+
+    let steps = (price / tick).floor();
+    let q_price = steps * tick;
+
+    // Truncate size to 6 decimals (token amount scale) to match signed integer scaling.
+    let q_size = size.round_dp_with_strategy(6, rust_decimal::RoundingStrategy::ToZero);
+
+    Ok((q_price, q_size))
+}
+
+fn decimal_to_u256_scaled(value: Decimal, scale: u32) -> Result<U256, ExecutorError> {
+    let factor = Decimal::from_i128_with_scale(10i128.pow(scale), 0);
+    let scaled = (value * factor).round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    let i = scaled
+        .to_i128()
+        .ok_or_else(|| ExecutorError::OrderRejected("amount scaling overflow".to_string()))?;
+    if i < 0 {
+        return Err(ExecutorError::OrderRejected(
+            "amount must be non-negative".to_string(),
+        ));
+    }
+    Ok(U256::from(i as u128))
 }
 
 #[cfg(test)]

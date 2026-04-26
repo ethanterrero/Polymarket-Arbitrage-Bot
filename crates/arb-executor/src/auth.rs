@@ -82,13 +82,30 @@ pub fn build_auth_headers(
     path: &str,
     body: &str,
 ) -> Result<HeaderMap, AuthError> {
-    let timestamp = Utc::now().timestamp().to_string();
-    let sig = build_hmac_signature(&creds.api_secret, &timestamp, method, path, body)?;
+    build_auth_headers_at(
+        creds,
+        method,
+        path,
+        body,
+        &Utc::now().timestamp().to_string(),
+    )
+}
+
+/// Same as `build_auth_headers` but allows the caller to provide the timestamp.
+/// Useful for deterministic tests.
+pub fn build_auth_headers_at(
+    creds: &ApiCredentials,
+    method: &str,
+    path: &str,
+    body: &str,
+    timestamp: &str,
+) -> Result<HeaderMap, AuthError> {
+    let sig = build_hmac_signature(&creds.api_secret, timestamp, method, path, body)?;
 
     let mut h = HeaderMap::new();
     h.insert("POLY_ADDRESS", HeaderValue::from_str(&creds.wallet_address)?);
     h.insert("POLY_SIGNATURE", HeaderValue::from_str(&sig)?);
-    h.insert("POLY_TIMESTAMP", HeaderValue::from_str(&timestamp)?);
+    h.insert("POLY_TIMESTAMP", HeaderValue::from_str(timestamp)?);
     h.insert("POLY_NONCE", HeaderValue::from_static("0"));
     h.insert("POLY_API_KEY", HeaderValue::from_str(&creds.api_key)?);
     h.insert("POLY_PASSPHRASE", HeaderValue::from_str(&creds.api_passphrase)?);
