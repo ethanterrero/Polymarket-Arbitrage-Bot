@@ -20,6 +20,18 @@ pub struct BinaryMarket {
     pub active: bool,
     /// Estimated total liquidity in USDC.
     pub liquidity: Option<Decimal>,
+    /// Whether this market settles via the Neg Risk CTF Exchange. Determines
+    /// which `verifyingContract` is used in the EIP-712 domain when signing
+    /// orders for this market.
+    pub neg_risk: bool,
+    /// Per-market trading fee in basis points (1 bp = 0.01%). Currently
+    /// derived from the global `base_fee_rate` config since Gamma does not
+    /// expose this per-market; the CLOB API exposes a per-market rate which
+    /// can replace this default once wired in.
+    pub fee_rate_bps: u32,
+    /// Minimum order price increment for this market (e.g. 0.01 or 0.001).
+    /// Limit prices on the CLOB must be a multiple of this.
+    pub min_tick_size: Decimal,
 }
 
 /// A single price level in an orderbook (price + available size).
