@@ -180,3 +180,83 @@ A reference vector is a "known input → known output" pair published by a trust
 5. **Wiremock integration test** — assert the full POSTed request body matches what a real Polymarket client would send, byte-for-byte on the order fields.
 6. **Startup allowance check** — verify USDC and CTF approvals to the exchange before enabling live mode; fail loudly if missing.
 
+---
+
+## 2026-04-25
+
+### What we did
+Implemented CREATE2 derivation of Polymarket proxy and Gnosis Safe addresses — the `maker` field on a signed CTF Exchange order. Pure cryptographic logic, no I/O. Pinned against Polymarket's own published address pairs so we know the bytes are correct without ever hitting Polygon.
+
+### Why this was needed
+A signed Polymarket order has a `maker` field that names the *funded account*. For the vast majority of users that's not the EOA — it's a CREATE2-deployed proxy contract owned by the EOA. Two flavors:
+
+- `PolyProxy` (signature type 1): minimal-clone proxy used for Magic/email accounts.
+- `PolyGnosisSafe` (signature type 2): Gnosis Safe deployed by Polymarket for browser-wallet users.
+
+Without the right `maker` address, the digest changes and the on-chain settlement reverts (or the CLOB rejects the order before it ever lands). The EIP-712 signing layer from 2026-04-21 produces the bytes; this module produces the address those bytes have to commit to.
+
+### What CREATE2 actually is
+CREATE2 is the Ethereum opcode that lets a contract deploy another contract at a *predictable* address — predictable because the address is computed purely from inputs the deployer chooses, with no dependence on transaction order or nonce. The formula is:
+
+```
+address = keccak256(0xff || factoryAddress || salt || keccak256(initCode))[12..32]
+```
+
+The four inputs:
+- `0xff` — a fixed prefix that domain-separates CREATE2 from regular CREATE.
+- `factoryAddress` — the contract that will deploy the new code (20 bytes).
+- `salt` — a 32-byte value the factory chooses; here, a hash of the user's EOA.
+- `keccak256(initCode)` — hash of the bytecode + constructor args of the deployed contract.
+
+Take keccak256 of those 85 bytes, drop the first 12, and that's the deployed address. The neat property: anyone who knows all four inputs can predict the address *before* deployment. So if Polymarket has registered "user X's funded account is at address Y", we don't need to call any RPC — we can verify it locally.
+
+### The two factories aren't symmetric
+This was the easy thing to get wrong. Both factories live on Polygon mainnet, both are CREATE2-deployed contracts owned by Polymarket, but the salt encoding differs:
+
+```
+PolyProxy:      salt = keccak256( abi.encodePacked(eoa) )    // 20 raw bytes
+PolyGnosisSafe: salt = keccak256( abi.encode(eoa) )          // 32 bytes, address left-padded
+```
+
+Solidity's `abi.encodePacked` concatenates without padding (so a 20-byte address stays 20 bytes); `abi.encode` left-pads each value to a 32-byte word. Two different inputs to keccak256 → two different salts → two different addresses. If we used the same salt formula for both, our Safe predictions would be wrong for every user.
+
+The init code hashes are also distinct because the contracts are different shapes — the proxy is an EIP-1167 minimal clone; the Safe is the full Gnosis Safe proxy with the master copy address baked into the constructor data.
+
+### New code
+- **`crates/arb-executor/src/proxy_address.rs`** — new module, ~140 lines:
+  - `POLYGON_PROXY_FACTORY` / `POLYGON_SAFE_FACTORY` — factory addresses.
+  - `PROXY_INIT_CODE_HASH` / `SAFE_INIT_CODE_HASH` — 32-byte init code digests as `[u8; 32]` constants (no string parsing at runtime).
+  - `derive_poly_proxy(eoa)`, `derive_poly_safe(eoa)` — the two specific derivations.
+  - `derive_maker_address(eoa, signature_type)` — single dispatch entry point that returns `eoa` for `Eoa` and routes the other two to the right derivation.
+- **`crates/arb-executor/src/lib.rs`** — added `pub mod proxy_address;`. No new dependencies; `primitive_types` and `sha3` were already pulled in by the order-signing module.
+
+### Tests
+Four unit tests, two of them deterministic reference-vector pins from `polymarket-client-sdk` v0.4.4 using the Anvil/Foundry test account #0 (`0xf39F...2266`):
+
+1. `poly_proxy_reference_vector` — expects `0x365f0cA36ae1F641E02Fe3b7743673DA42A13a70`.
+2. `poly_safe_reference_vector` — expects `0xd93b25Cb943D14d0d34FBAf01fc93a0F8b5f6e47`.
+3. `derive_maker_address_dispatches_by_type` — exercises the dispatch wrapper for all three signature types.
+4. `proxy_and_safe_differ` — sanity check that the two derivations don't accidentally produce the same address (they would if the salt encoding got copy-pasted between functions).
+
+All four pass. As with the order-signing tests, passing the reference vectors means the constants and the encoding are byte-identical to Polymarket's official client.
+
+### Caveat we wrote into the module docs
+For Magic-Link users, the on-chain proxy can occasionally diverge from the CREATE2 prediction — Polymarket's backend may have mapped a user to a different proxy than `keccak256(eoa)` predicts (open issue: `Polymarket/polymarket-cli#14`). The robust live path is to fetch the funded address from `/profiles` and treat this derivation as a verification/fallback. This isn't a correctness bug in the math; it's a backend mapping that doesn't always match the deterministic derivation. Documented at the top of the module so future-us doesn't get confused if a manual address check disagrees.
+
+### Concept learned: counterfactual addresses
+Because CREATE2 makes the address a pure function of inputs known *before* deployment, you can sign messages addressed to a contract that doesn't exist on-chain yet. This is what Polymarket does for new users: the funded proxy may not actually be deployed until the user's first trade, but the address is known and orders can be signed against it. The chain doesn't care — once the proxy is deployed (by anyone), the historical signatures referencing that address become valid. That property is what makes "1-click signup → trade" possible without paying a deployment gas fee upfront.
+
+### State after today
+- `cargo build --workspace` — clean.
+- `cargo test --workspace` — 30 tests pass (was 26; +4 new).
+- Branch: `feat/proxy-address-derivation`.
+- Order signing layer + funded-address derivation are both complete and verified offline. We can now produce a (signature, maker) pair that matches what Polymarket's official clients produce, given a private key and a market.
+
+### What's next (in order)
+1. **BinaryMarket metadata plumbing** — add `neg_risk`, `fee_rate_bps`, `min_tick_size`, `condition_id` fields to the scanner's market type; parse them from the Gamma API response. Without these the order signer can't pick the right verifying contract or fee rate.
+2. **Price/size → makerAmount/takerAmount math** — port `rs-clob-client`'s quantization (truncate to 6 decimals USDC scale, side-aware mapping). Reference vectors live in `python-order-utils/tests/test_order_builder.py`.
+3. **Rewrite the `/order` request body** — wrap signed Order + orderType + owner (API key UUID) into the JSON shape the CLOB expects; salt as a JSON number that fits in u53; amounts as decimal strings; side as `"BUY"`/`"SELL"`.
+4. **Wiremock integration test** — assert the full POSTed request body matches a real Polymarket client byte-for-byte on the order fields.
+5. **Startup allowance check** — verify USDC and CTF approvals to the exchange before enabling live mode; fail loudly if missing.
+
+
