@@ -259,4 +259,69 @@ Because CREATE2 makes the address a pure function of inputs known *before* deplo
 4. **Wiremock integration test** — assert the full POSTed request body matches a real Polymarket client byte-for-byte on the order fields.
 5. **Startup allowance check** — verify USDC and CTF approvals to the exchange before enabling live mode; fail loudly if missing.
 
+---
+
+## 2026-04-25 (afternoon)
+
+### What we did
+Plumbed three new market metadata fields end-to-end (`neg_risk`, `fee_rate_bps`, `min_tick_size`) so the order signer has the inputs it needs. Found and fixed a latent scanner bug along the way: the bot has been silently fetching zero markets in dry-run.
+
+### The latent bug
+`GammaMarketResponse::condition_id` was declared as bare `condition_id: Option<String>` with `#[serde(default)]`. Polymarket's Gamma API returns `conditionId` (camelCase). Serde matches on the literal field name unless `rename` is set, so the field defaulted to `None` for every response. Then in `parse_binary_market` the very first line is `let condition_id = raw.condition_id?;` — early-return on `None` — so every market was dropped silently.
+
+The bot still ran end-to-end because dry-run mode logged "0 opportunities found" without distinguishing "no profitable spreads" from "no markets to scan." Caught it before adding new fields by curling Gamma and noticing the response uses `conditionId`, `negRisk`, `clobTokenIds` — camelCase across the board (`clobTokenIds` was already correctly renamed; `condition_id` had been overlooked).
+
+Fix: `#[serde(rename = "conditionId")]` on the field. Same renames added preemptively for the new fields.
+
+### Why metadata plumbing was needed
+The order signer needs three pieces of per-market info that the scanner wasn't providing:
+
+- **`neg_risk: bool`** — selects which CTF Exchange `verifyingContract` goes into the EIP-712 domain. Two contracts on Polygon: standard (`0x4bFb…8982E`) and Neg Risk (`0xC5d5…20f80a`). A signature produced for one is not valid at the other. ~Half of Polymarket's markets use Neg Risk; getting this wrong would make all of those silently fail.
+- **`fee_rate_bps: u32`** — gets ABI-encoded into the order struct hash. Wrong value → wrong digest → CLOB rejection.
+- **`min_tick_size: Decimal`** — needed for limit price quantization. The CLOB rejects prices that aren't a multiple of this.
+
+### What changed
+
+**`crates/arb-types/src/lib.rs`** — three new fields on `BinaryMarket`. Picked types deliberately:
+- `neg_risk: bool` — Gamma returns a real boolean, no encoding gymnastics.
+- `fee_rate_bps: u32` — Solidity `uint256`, but per-market fees are always tiny integers (Polymarket's max is ~500 bps); `u32` is enough headroom and avoids dragging `U256` into a domain type.
+- `min_tick_size: Decimal` — Gamma returns `0.01` / `0.001` as JSON numbers; `Decimal` preserves that exactly without float imprecision.
+
+**`crates/arb-scanner/src/lib.rs`**:
+- Fixed the `conditionId` rename bug.
+- Added `negRisk` and `orderPriceMinTickSize` to `GammaMarketResponse` with `#[serde(default)]` so missing fields don't break parsing.
+- New `default_fee_rate_bps` field on `MarketScanner`, derived once at construction from `config.strategy.base_fee_rate` via a new `decimal_to_bps` helper that truncates toward zero (matches the CTF Exchange's integer-bps representation).
+- New constant `DEFAULT_MIN_TICK_SIZE = 0.01` for markets where Gamma omits the tick size.
+
+**Test fixtures** — `BinaryMarket` is constructed directly in three test sites (arb-risk, arb-executor, arb-strategy). All updated.
+
+### Why fee_rate_bps comes from config, not the API
+Gamma doesn't expose per-market fee rates. The CLOB API has a `/fee-rate-bps` endpoint that does, but wiring that adds a network dependency on every market refresh and another failure mode to handle. Scope for this PR is metadata *plumbing* — adding the field and a sane default gets the order signer unblocked. Replacing the default with real per-market rates from the CLOB belongs in the same task that wires the order request body, where we'll already be talking to the CLOB API.
+
+This is captured as a TODO comment on the new `default_fee_rate_bps` field. Polymarket's standard fee is currently 0 bps for most markets, so this default isn't actively wrong — it's just not personalized per market.
+
+### New tests
+Three tests in `arb-scanner`, total +3:
+
+1. **`deserializes_real_gamma_field_names`** — captured a trimmed real Gamma response (the GTA VI / Russia-Ukraine ceasefire market, `0x9c1a…5763`) and asserts the deserializer extracts all the camelCase fields correctly. This is the test that would have caught the `condition_id` bug from day one if it existed.
+2. **`defaults_apply_when_neg_risk_and_tick_size_are_missing`** — defensive: if Gamma ever drops these fields, we fall through to `None` rather than panicking.
+3. **`decimal_to_bps_basic_cases`** — the bps conversion truncates correctly (`0.0001` → 1 bp, `0.00019` → 1 bp, not 2).
+
+### Concept learned: silent failures from default-deserialized fields
+`#[serde(default)]` is a useful resilience pattern — it means a missing field doesn't fail the whole parse — but it's also a great way to hide bugs. If the field name doesn't match the wire format, the field always defaults, and downstream code never knows the difference between "API didn't send it" and "we asked for the wrong key." Two ways to defend:
+1. Always assert against a real captured response in unit tests, not synthetic JSON written to match the struct (because both will pass even if the struct is wrong).
+2. For load-bearing fields where missing-data should be a hard error, drop `#[serde(default)]` and let serde fail loudly. The `condition_id` field is load-bearing — we could plausibly upgrade that to non-default once we're confident in the shape.
+
+### State after today
+- `cargo build --workspace` — clean.
+- `cargo test --workspace` — 33 tests pass (was 30; +3 new).
+- Branch: `feat/market-metadata-plumbing`.
+- Scanner now produces actual non-zero market lists with the metadata the order signer needs.
+
+### What's next (in order)
+1. **Price/size → makerAmount/takerAmount math** — port `rs-clob-client`'s quantization (truncate to 6 decimals USDC scale, side-aware mapping). Reference vectors live in `python-order-utils/tests/test_order_builder.py`.
+2. **Rewrite the `/order` request body** — wrap signed Order + orderType + owner (API key UUID) into the JSON shape the CLOB expects; salt as a JSON number that fits in u53; amounts as decimal strings; side as `"BUY"`/`"SELL"`. This is also where we'd swap `default_fee_rate_bps` for a real per-market fetch from `/fee-rate-bps`.
+3. **Wiremock integration test** — assert the full POSTed request body matches a real Polymarket client byte-for-byte on the order fields.
+4. **Startup allowance check** — verify USDC and CTF approvals to the exchange before enabling live mode; fail loudly if missing.
+
 

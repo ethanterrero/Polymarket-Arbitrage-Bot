@@ -541,6 +541,9 @@ mod tests {
             slug: "will-it-rain".to_string(),
             active: true,
             liquidity: Some(dec!(1000)),
+            neg_risk: false,
+            fee_rate_bps: 0,
+            min_tick_size: dec!(0.01),
         }
     }
 
