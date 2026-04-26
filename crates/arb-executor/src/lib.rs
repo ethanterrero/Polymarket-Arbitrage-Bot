@@ -546,6 +546,7 @@ mod tests {
                 chain_id: 137,
                 wallet_address: String::new(),
             },
+            execution: arb_config::ExecutionConfig::default(),
             strategy: arb_config::StrategyConfig {
                 min_net_spread: dec!(0.005),
                 base_fee_rate: dec!(0.0),

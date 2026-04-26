@@ -1,5 +1,5 @@
 use anyhow::Result;
-use arb_config::AppConfig;
+use arb_config::{AppConfig, ExecutionMode};
 use arb_executor::OrderExecutor;
 use arb_inventory::InventoryManager;
 use arb_monitor::PriceMonitor;
@@ -42,20 +42,22 @@ async fn main() -> Result<()> {
     let inventory = Arc::new(InventoryManager::new(config.strategy.max_unpaired_hold_secs));
 
     // Determine execution mode.
-    let executor = match AppConfig::load_private_key() {
-        Ok(key) => match OrderExecutor::new_live(&config, &key).await {
-            Ok(exec) => {
-                info!("Live trading enabled");
-                Arc::new(exec)
+    let executor: Arc<OrderExecutor> = match config.execution.mode {
+        ExecutionMode::DryRun => {
+            if std::env::var("POLYMARKET_PRIVATE_KEY").is_ok() {
+                warn!(
+                    "POLYMARKET_PRIVATE_KEY is set, but execution.mode=dry_run — live trading is disabled"
+                );
+            } else {
+                info!("execution.mode=dry_run — running in dry-run mode");
             }
-            Err(e) => {
-                warn!(error = %e, "API key derivation failed — falling back to dry-run");
-                Arc::new(OrderExecutor::new_dry_run(&config))
-            }
-        },
-        Err(_) => {
-            info!("No private key found — running in dry-run mode");
             Arc::new(OrderExecutor::new_dry_run(&config))
+        }
+        ExecutionMode::Live => {
+            let key = AppConfig::load_private_key()?;
+            let exec = OrderExecutor::new_live(&config, &key).await?;
+            info!("execution.mode=live — live trading enabled");
+            Arc::new(exec)
         }
     };
 
