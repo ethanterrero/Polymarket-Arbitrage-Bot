@@ -324,4 +324,31 @@ Three tests in `arb-scanner`, total +3:
 3. **Wiremock integration test** — assert the full POSTed request body matches a real Polymarket client byte-for-byte on the order fields.
 4. **Startup allowance check** — verify USDC and CTF approvals to the exchange before enabling live mode; fail loudly if missing.
 
+---
+
+## 2026-04-25 (evening)
+
+### What we did
+Started wiring the full signed-order `/order` payload so live trading can submit CTF Exchange orders the CLOB will accept.
+
+### Key changes
+- **Signed order request shape**: replaced the legacy `{token_id, price, size, ...}` body with a structured payload that includes a signed EIP-712 `Order` plus `orderType` and `owner` (API key id).
+- **Quantization**: added `min_tick_size` price snapping and 6-decimal truncation for amounts before converting to `uint256` and signing.
+- **Maker address**: `maker` is derived from the signer address + `SignatureType` (EOA by default; overrideable via `POLYMARKET_SIGNATURE_TYPE`).
+- **Deterministic auth headers for tests**: added `build_auth_headers_at(...)` so HMAC signing can be tested with a fixed timestamp.
+- **Integration-ish test**: added a mock-server test that asserts we can build and send a signed `/order` request with auth headers and get a success response.
+
+### Caveats / still TODO
+- **Amount math**: `makerAmount`/`takerAmount` scaling is implemented at 6 decimals for both, but we still need to cross-check against Polymarket’s `rs-clob-client` / official spec for token amount scaling and edge-case rounding.
+- **Per-market fee rate**: `fee_rate_bps` is still a default derived from config; wiring the real `/fee-rate-bps` fetch belongs with the finalized order-wiring path.
+- **Allowances**: live mode still needs explicit startup allowance checks before enabling live execution.
+
+### State after today
+- `cargo test --workspace` passes (now includes a mock `/order` test in `arb-executor`).
+
+### What's next
+1. Verify `makerAmount`/`takerAmount` quantization against a known-good client and add a pinned reference-vector test for the full request body.
+2. Swap fee rate default for a real per-market `/fee-rate-bps` lookup (cached).
+3. Add startup allowance checks for USDC + CTF approvals before live execution.
+
 

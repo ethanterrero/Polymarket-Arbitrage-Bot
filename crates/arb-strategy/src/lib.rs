@@ -352,6 +352,9 @@ impl ArbitrageDetector {
                     size: yes_ask.size,
                     target_price: yes_ask.price,
                     use_fok: self.use_fok,
+                    neg_risk: market.neg_risk,
+                    fee_rate_bps: market.fee_rate_bps,
+                    min_tick_size: market.min_tick_size,
                 });
             }
         }
@@ -373,6 +376,9 @@ impl ArbitrageDetector {
                     size: no_ask.size,
                     target_price: no_ask.price,
                     use_fok: self.use_fok,
+                    neg_risk: market.neg_risk,
+                    fee_rate_bps: market.fee_rate_bps,
+                    min_tick_size: market.min_tick_size,
                 });
             }
         }

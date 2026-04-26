@@ -313,6 +313,12 @@ pub struct LegOrder {
     pub size: Decimal,
     pub target_price: Decimal,
     pub use_fok: bool,
+    /// Whether this market uses the Neg Risk exchange variant (affects EIP-712 domain).
+    pub neg_risk: bool,
+    /// Trading fee in basis points (encoded into the signed order struct).
+    pub fee_rate_bps: u32,
+    /// Minimum order price increment for this market (used for quantization).
+    pub min_tick_size: Decimal,
 }
 
 /// Result of executing a single-leg buy.
