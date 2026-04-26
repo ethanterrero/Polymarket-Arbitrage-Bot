@@ -11,10 +11,29 @@ pub enum ConfigError {
     MissingEnv(String),
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    DryRun,
+    Live,
+}
+
+fn default_execution_mode() -> ExecutionMode {
+    ExecutionMode::DryRun
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionConfig {
+    #[serde(default = "default_execution_mode")]
+    pub mode: ExecutionMode,
+}
+
 /// Top-level application configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub polymarket: PolymarketConfig,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
     pub strategy: StrategyConfig,
     pub risk: RiskConfig,
     pub scanner: ScannerConfig,
@@ -121,6 +140,14 @@ pub struct LoggingConfig {
     pub json_output: bool,
 }
 
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_execution_mode(),
+        }
+    }
+}
+
 impl AppConfig {
     /// Load configuration from `config/default.toml`, with environment variable overrides.
     ///
@@ -175,6 +202,9 @@ gamma_url = "https://gamma-api.polymarket.com"
 ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 chain_id = 137
 
+[execution]
+mode = "dry_run"
+
 [strategy]
 min_net_spread = "0.005"
 base_fee_rate = "0.0"
@@ -215,6 +245,7 @@ json_output = false
         assert_eq!(config.risk.max_concurrent_positions, 10);
         assert_eq!(config.scanner.max_markets, 200);
         assert!(config.monitor.use_websocket);
+        assert_eq!(config.execution.mode, ExecutionMode::DryRun);
 
         std::fs::remove_dir_all(dir).ok();
     }
