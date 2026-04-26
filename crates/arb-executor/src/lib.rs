@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod order_signing;
+pub mod proxy_address;
 
 use arb_config::AppConfig;
 use arb_types::{ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, SweepExecutionOrder};
