@@ -4,6 +4,10 @@ gamma_url = "https://gamma-api.polymarket.com"
 ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 chain_id = 137
 
+[execution]
+# Explicit opt-in. Set to "live" only when you're ready to send authenticated requests.
+mode = "dry_run"
+
 [strategy]
 min_net_spread = "0.005"
 base_fee_rate = "0.0"
