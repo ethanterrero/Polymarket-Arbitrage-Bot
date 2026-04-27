@@ -1,4 +1,6 @@
+pub mod allowances;
 pub mod auth;
+pub mod fee_rates;
 pub mod order_signing;
 pub mod proxy_address;
 
@@ -7,6 +9,7 @@ use arb_types::{
     BinaryMarket, ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, SweepExecutionOrder,
 };
 use auth::ApiCredentials;
+use fee_rates::FeeRateCache;
 use k256::ecdsa::SigningKey;
 use order_signing::{Order, OrderSide, SignatureType};
 use primitive_types::{H160, U256};
@@ -56,6 +59,8 @@ pub enum ExecutorError {
     Auth(String),
     #[error("Order rejected: {0}")]
     OrderRejected(String),
+    #[error("fee-rate fetch error: {0}")]
+    FeeRate(#[from] fee_rates::FeeRateError),
 }
 
 /// Represents the order type sent to the CLOB.
@@ -93,6 +98,10 @@ pub struct OrderExecutor {
     creds: Option<ApiCredentials>,
     signing_key: Option<SigningKey>,
     signature_type: SignatureType,
+    /// Per-token-id cache of CLOB `base_fee` rates, fetched lazily before
+    /// signing each order. Replaces the config-derived default that lived
+    /// on `BinaryMarket.fee_rate_bps`.
+    fee_rates: FeeRateCache,
 }
 
 impl OrderExecutor {
@@ -106,6 +115,7 @@ impl OrderExecutor {
             creds: None,
             signing_key: None,
             signature_type: SignatureType::Eoa,
+            fee_rates: FeeRateCache::new(),
         }
     }
 
@@ -156,7 +166,48 @@ impl OrderExecutor {
             creds: Some(creds),
             signing_key: Some(signing_key),
             signature_type,
+            fee_rates: FeeRateCache::new(),
         })
+    }
+
+    /// Run the on-chain allowance check using this executor's signing
+    /// identity (EOA + signature type derive the maker address). Logs the
+    /// result and returns Err if any approval is missing.
+    ///
+    /// Threshold is derived from `max_total_exposure_usdc` scaled to USDC
+    /// base units (6 decimals): an approval ≥ this is considered sufficient.
+    /// Returns Err in dry-run mode (no signing identity to check).
+    pub async fn enforce_startup_allowances(
+        &self,
+        polygon_rpc_url: &str,
+        max_total_exposure_usdc: Decimal,
+    ) -> Result<(), String> {
+        let creds = self
+            .creds
+            .as_ref()
+            .ok_or_else(|| "dry-run executor has no signing identity".to_string())?;
+        let eoa = order_signing::parse_address(&creds.wallet_address)
+            .map_err(|e| e.to_string())?;
+
+        let factor = Decimal::from(1_000_000u64);
+        let min_decimal = max_total_exposure_usdc * factor;
+        let min_u128: u128 = min_decimal
+            .round()
+            .to_u128()
+            .ok_or_else(|| "max_total_exposure_usdc too large for u128".to_string())?;
+        let min_u256 = U256::from(min_u128);
+
+        let report = allowances::check_startup_allowances(
+            &self.client,
+            polygon_rpc_url,
+            self.chain_id,
+            eoa,
+            self.signature_type,
+            min_u256,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        allowances::enforce(&report)
     }
 
     /// Execute an arbitrage order (buy YES + buy NO concurrently).
@@ -326,8 +377,20 @@ impl OrderExecutor {
         order_type: &OrderType,
     ) -> Result<ClobOrderResponse, ExecutorError> {
         let url = format!("{}/order", self.clob_url);
-        let (body_json, headers) =
-            self.build_signed_order_http_request(market, token_id, price, size, order_type, None, None)?;
+        let fee_rate_bps = self
+            .fee_rates
+            .get(&self.client, &self.clob_url, token_id)
+            .await?;
+        let (body_json, headers) = self.build_signed_order_http_request(
+            market,
+            token_id,
+            price,
+            size,
+            order_type,
+            fee_rate_bps,
+            None,
+            None,
+        )?;
 
         let resp = self
             .client
@@ -357,6 +420,7 @@ impl OrderExecutor {
         price: Decimal,
         size: Decimal,
         order_type: &OrderType,
+        fee_rate_bps: u32,
         fixed_timestamp: Option<&str>,
         fixed_salt: Option<u64>,
     ) -> Result<(String, HeaderMap), ExecutorError> {
@@ -379,9 +443,8 @@ impl OrderExecutor {
         let signature_type = self.signature_type;
         let maker = proxy_address::derive_maker_address(signer, signature_type);
 
-        let (q_price, q_size) = quantize_price_and_size(price, size, market.min_tick_size)?;
-        let maker_amount = decimal_to_u256_scaled(q_price * q_size, 6)?;
-        let taker_amount = decimal_to_u256_scaled(q_size, 6)?;
+        let (maker_amount, taker_amount) =
+            buy_order_amounts(price, size, market.min_tick_size)?;
 
         let token_u256 = U256::from_dec_str(token_id.trim()).map_err(|_| {
             ExecutorError::OrderRejected(format!("invalid token_id (not a uint256): {}", token_id))
@@ -399,7 +462,7 @@ impl OrderExecutor {
             taker_amount,
             expiration: U256::zero(),
             nonce: U256::zero(),
-            fee_rate_bps: U256::from(market.fee_rate_bps),
+            fee_rate_bps: U256::from(fee_rate_bps),
             side: OrderSide::Buy,
             signature_type,
         };
@@ -419,7 +482,7 @@ impl OrderExecutor {
                 taker_amount: taker_amount.to_string(),
                 expiration: "0".to_string(),
                 nonce: "0".to_string(),
-                fee_rate_bps: market.fee_rate_bps.to_string(),
+                fee_rate_bps: fee_rate_bps.to_string(),
                 side: "BUY".to_string(),
                 signature_type: signature_type as u8,
                 signature: sig_hex,
@@ -681,29 +744,58 @@ fn make_salt_u53() -> u64 {
     ms & ((1u64 << 53) - 1)
 }
 
-fn quantize_price_and_size(
-    price: Decimal,
-    size: Decimal,
-    tick: Decimal,
-) -> Result<(Decimal, Decimal), ExecutorError> {
+/// Decimal places for each supported `min_tick_size`. Mirrors the
+/// `ROUNDING_CONFIG` table in `Polymarket/py-clob-client`
+/// (`order_builder/builder.py`): only `0.1`, `0.01`, `0.001`, `0.0001` are
+/// valid CLOB tick sizes.
+fn tick_decimals(tick: Decimal) -> Result<u32, ExecutorError> {
     if tick <= Decimal::ZERO {
         return Err(ExecutorError::OrderRejected(
             "min_tick_size must be > 0".to_string(),
         ));
     }
+    let t = tick.normalize();
+    let scale = t.scale();
+    if t.mantissa() == 1 && (1..=4).contains(&scale) {
+        Ok(scale)
+    } else {
+        Err(ExecutorError::OrderRejected(format!(
+            "unsupported min_tick_size: {} (expected 0.1, 0.01, 0.001, or 0.0001)",
+            tick
+        )))
+    }
+}
 
-    let steps = (price / tick).floor();
-    let q_price = steps * tick;
-
-    // Truncate size to 6 decimals (token amount scale) to match signed integer scaling.
-    let q_size = size.round_dp_with_strategy(6, rust_decimal::RoundingStrategy::ToZero);
-
+/// Quantize a (price, size) pair for a Polymarket BUY order, matching
+/// `py-clob-client`'s `get_order_amounts` / `ROUNDING_CONFIG`:
+///
+/// - price → banker's-rounded ("round_normal") to the tick's decimal places.
+/// - size  → truncated ("round_down") to 2 decimal places.
+///
+/// Polymarket orders are constrained to size in 0.01-token units; truncating
+/// to 6 dp would let the bot send amounts the CLOB rejects. The tick decimals
+/// table above is the per-market price precision.
+fn quantize_price_and_size(
+    price: Decimal,
+    size: Decimal,
+    tick: Decimal,
+) -> Result<(Decimal, Decimal), ExecutorError> {
+    let price_dp = tick_decimals(tick)?;
+    let q_price =
+        price.round_dp_with_strategy(price_dp, rust_decimal::RoundingStrategy::MidpointNearestEven);
+    let q_size = size.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
     Ok((q_price, q_size))
 }
 
+/// Scale a `Decimal` by `10^scale` and convert to a `U256`. Mirrors
+/// `to_token_decimals` in `py-clob-client/order_builder/helpers.py`: scale
+/// then banker's-round to integer. With the upstream-matching quantization
+/// above (price ≤ 4 dp, size ≤ 2 dp), products always fit in 6 dp so the
+/// rounding step is a no-op, but it stays for defense-in-depth.
 fn decimal_to_u256_scaled(value: Decimal, scale: u32) -> Result<U256, ExecutorError> {
     let factor = Decimal::from_i128_with_scale(10i128.pow(scale), 0);
-    let scaled = (value * factor).round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    let scaled = (value * factor)
+        .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointNearestEven);
     let i = scaled
         .to_i128()
         .ok_or_else(|| ExecutorError::OrderRejected("amount scaling overflow".to_string()))?;
@@ -713,6 +805,20 @@ fn decimal_to_u256_scaled(value: Decimal, scale: u32) -> Result<U256, ExecutorEr
         ));
     }
     Ok(U256::from(i as u128))
+}
+
+/// Compute `(maker_amount, taker_amount)` as `U256` token-decimal integers
+/// for a BUY order, applying the same quantization the CLOB expects.
+/// Pinned against `py-clob-client`'s `get_order_amounts` for the BUY branch.
+fn buy_order_amounts(
+    price: Decimal,
+    size: Decimal,
+    tick: Decimal,
+) -> Result<(U256, U256), ExecutorError> {
+    let (q_price, q_size) = quantize_price_and_size(price, size, tick)?;
+    let maker_amount = decimal_to_u256_scaled(q_price * q_size, 6)?;
+    let taker_amount = decimal_to_u256_scaled(q_size, 6)?;
+    Ok((maker_amount, taker_amount))
 }
 
 #[cfg(test)]
@@ -734,6 +840,7 @@ mod tests {
                 ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
                 chain_id: 137,
                 wallet_address: String::new(),
+                polygon_rpc_url: "https://polygon-rpc.com".to_string(),
             },
             execution: arb_config::ExecutionConfig::default(),
             strategy: arb_config::StrategyConfig {
@@ -809,6 +916,83 @@ mod tests {
         }
     }
 
+    // ─── BUY order amount quantization — pinned against upstream ──────────
+    //
+    // Reference: `Polymarket/py-clob-client`, `order_builder/builder.py`
+    // (`get_order_amounts`, BUY branch) + `order_builder/helpers.py`
+    // (`round_normal`, `round_down`, `to_token_decimals`). The expected
+    // integer amounts below are computed by hand using the same algorithm.
+
+    #[test]
+    fn buy_amounts_tick_001_basic() {
+        // tick=0.01: round_normal(0.45, 2) = 0.45; round_down(10.0, 2) = 10.0;
+        // raw_maker = 4.5; maker = 4_500_000; taker = 10_000_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.45), dec!(10.0), dec!(0.01)).unwrap();
+        assert_eq!(maker, U256::from(4_500_000u64));
+        assert_eq!(taker, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_size_truncates_to_two_dp() {
+        // tick=0.01, size=10.789 → round_down(size, 2) = 10.78 (NOT 10.79).
+        // raw_maker = 10.78 * 0.50 = 5.39; maker = 5_390_000; taker = 10_780_000.
+        // Catches the previous 6-dp size truncation bug.
+        let (maker, taker) = buy_order_amounts(dec!(0.50), dec!(10.789), dec!(0.01)).unwrap();
+        assert_eq!(maker, U256::from(5_390_000u64));
+        assert_eq!(taker, U256::from(10_780_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_tick_0001_preserves_three_dp_price() {
+        // tick=0.001, price=0.567 (already 3-dp, round_normal is a no-op),
+        // size=12.345 → 12.34. raw_maker = 12.34 * 0.567 = 6.99678.
+        // maker = 6_996_780; taker = 12_340_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.567), dec!(12.345), dec!(0.001)).unwrap();
+        assert_eq!(maker, U256::from(6_996_780u64));
+        assert_eq!(taker, U256::from(12_340_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_tick_00001_preserves_four_dp_price() {
+        // tick=0.0001, price=0.1234, size=10.0. raw_maker = 1.234.
+        // maker = 1_234_000; taker = 10_000_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.1234), dec!(10.0), dec!(0.0001)).unwrap();
+        assert_eq!(maker, U256::from(1_234_000u64));
+        assert_eq!(taker, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_price_quantizes_to_tick_decimals() {
+        // tick=0.01, price=0.4567 → round_normal(0.4567, 2) = 0.46
+        // (3rd decimal 6 > 5, round up). size=10.0. raw_maker = 4.6.
+        // maker = 4_600_000; taker = 10_000_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.4567), dec!(10.0), dec!(0.01)).unwrap();
+        assert_eq!(maker, U256::from(4_600_000u64));
+        assert_eq!(taker, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_tick_01_one_decimal_price() {
+        // tick=0.1, price=0.5, size=10.0 → maker = 5_000_000; taker = 10_000_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.5), dec!(10.0), dec!(0.1)).unwrap();
+        assert_eq!(maker, U256::from(5_000_000u64));
+        assert_eq!(taker, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_rejects_unsupported_tick() {
+        // py-clob-client only defines ROUNDING_CONFIG for {0.1, 0.01, 0.001, 0.0001};
+        // anything else should fail loudly, not silently produce malformed amounts.
+        let err = buy_order_amounts(dec!(0.45), dec!(10.0), dec!(0.005)).unwrap_err();
+        assert!(matches!(err, ExecutorError::OrderRejected(_)));
+    }
+
+    #[test]
+    fn buy_amounts_rejects_zero_or_negative_tick() {
+        assert!(buy_order_amounts(dec!(0.45), dec!(10.0), dec!(0)).is_err());
+        assert!(buy_order_amounts(dec!(0.45), dec!(10.0), dec!(-0.01)).is_err());
+    }
+
     #[tokio::test]
     async fn test_dry_run_returns_dry_run_result() {
         let config = make_test_config();
@@ -867,6 +1051,7 @@ mod tests {
             creds: Some(creds),
             signing_key: Some(signing_key),
             signature_type: SignatureType::Eoa,
+            fee_rates: FeeRateCache::new(),
         };
 
         // Force deterministic timestamp + salt so auth signature is stable.
@@ -877,6 +1062,7 @@ mod tests {
                 dec!(0.45),
                 dec!(10.0),
                 &OrderType::Gtc,
+                12,
                 Some("1700000000"),
                 Some(42),
             )
@@ -898,5 +1084,83 @@ mod tests {
         assert!(resp.status().is_success());
 
         m.assert();
+    }
+
+    #[tokio::test]
+    async fn place_order_resolves_fee_rate_via_clob_and_caches() {
+        use httpmock::Method::GET;
+        let server = MockServer::start();
+
+        // /fee-rate returns base_fee = 17 bps for the queried token.
+        let fee_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/fee-rate")
+                .query_param("token_id", "1234");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"base_fee":17}"#);
+        });
+
+        // /order accepts and returns success. Capture the body so we can assert
+        // that the fetched fee_rate_bps (17), not the BinaryMarket default (99),
+        // ended up in the signed payload.
+        let order_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/order")
+                .body_includes(r#""feeRateBps":"17""#);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"success":true,"order_id":"abc"}"#);
+        });
+
+        let key_bytes =
+            hex::decode("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+                .unwrap();
+        let signing_key = SigningKey::from_bytes(key_bytes.as_slice().into()).unwrap();
+        let secret = base64::engine::general_purpose::URL_SAFE.encode(b"test-secret-key-32-bytes-padding");
+        let creds = ApiCredentials {
+            api_key: "owner".to_string(),
+            api_secret: secret,
+            api_passphrase: "pass".to_string(),
+            wallet_address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string(),
+        };
+
+        let market = BinaryMarket {
+            condition_id: "cond".to_string(),
+            yes_token_id: "1234".to_string(),
+            no_token_id: "5678".to_string(),
+            question: "q".to_string(),
+            slug: "s".to_string(),
+            active: true,
+            liquidity: None,
+            neg_risk: false,
+            // Stale per-market default — must be ignored in favor of the
+            // /fee-rate fetch.
+            fee_rate_bps: 99,
+            min_tick_size: dec!(0.01),
+        };
+
+        let exec = OrderExecutor {
+            client: reqwest::Client::new(),
+            clob_url: server.url(""),
+            dry_run: false,
+            chain_id: order_signing::contracts::POLYGON_CHAIN_ID,
+            creds: Some(creds),
+            signing_key: Some(signing_key),
+            signature_type: SignatureType::Eoa,
+            fee_rates: FeeRateCache::new(),
+        };
+
+        // First call: /fee-rate hit + /order hit.
+        exec.place_order(&market, "1234", dec!(0.45), dec!(10.0), &OrderType::Gtc)
+            .await
+            .unwrap();
+        // Second call: cache hit, no extra /fee-rate; /order hit again.
+        exec.place_order(&market, "1234", dec!(0.45), dec!(10.0), &OrderType::Gtc)
+            .await
+            .unwrap();
+
+        fee_mock.assert_calls(1);
+        order_mock.assert_calls(2);
     }
 }

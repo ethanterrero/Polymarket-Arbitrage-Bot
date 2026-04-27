@@ -51,6 +51,15 @@ pub struct PolymarketConfig {
     /// Leave empty to skip live balance checks (bot runs with balance = 0).
     #[serde(default)]
     pub wallet_address: String,
+    /// Polygon JSON-RPC endpoint used by the startup allowance check.
+    /// Default is the public Polygon RPC; users hitting rate limits should
+    /// supply their own (Alchemy/Infura/QuickNode/etc.).
+    #[serde(default = "default_polygon_rpc_url")]
+    pub polygon_rpc_url: String,
+}
+
+fn default_polygon_rpc_url() -> String {
+    "https://polygon-rpc.com".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
