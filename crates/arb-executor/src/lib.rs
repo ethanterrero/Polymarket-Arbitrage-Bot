@@ -379,9 +379,8 @@ impl OrderExecutor {
         let signature_type = self.signature_type;
         let maker = proxy_address::derive_maker_address(signer, signature_type);
 
-        let (q_price, q_size) = quantize_price_and_size(price, size, market.min_tick_size)?;
-        let maker_amount = decimal_to_u256_scaled(q_price * q_size, 6)?;
-        let taker_amount = decimal_to_u256_scaled(q_size, 6)?;
+        let (maker_amount, taker_amount) =
+            buy_order_amounts(price, size, market.min_tick_size)?;
 
         let token_u256 = U256::from_dec_str(token_id.trim()).map_err(|_| {
             ExecutorError::OrderRejected(format!("invalid token_id (not a uint256): {}", token_id))
@@ -681,29 +680,58 @@ fn make_salt_u53() -> u64 {
     ms & ((1u64 << 53) - 1)
 }
 
-fn quantize_price_and_size(
-    price: Decimal,
-    size: Decimal,
-    tick: Decimal,
-) -> Result<(Decimal, Decimal), ExecutorError> {
+/// Decimal places for each supported `min_tick_size`. Mirrors the
+/// `ROUNDING_CONFIG` table in `Polymarket/py-clob-client`
+/// (`order_builder/builder.py`): only `0.1`, `0.01`, `0.001`, `0.0001` are
+/// valid CLOB tick sizes.
+fn tick_decimals(tick: Decimal) -> Result<u32, ExecutorError> {
     if tick <= Decimal::ZERO {
         return Err(ExecutorError::OrderRejected(
             "min_tick_size must be > 0".to_string(),
         ));
     }
+    let t = tick.normalize();
+    let scale = t.scale();
+    if t.mantissa() == 1 && (1..=4).contains(&scale) {
+        Ok(scale)
+    } else {
+        Err(ExecutorError::OrderRejected(format!(
+            "unsupported min_tick_size: {} (expected 0.1, 0.01, 0.001, or 0.0001)",
+            tick
+        )))
+    }
+}
 
-    let steps = (price / tick).floor();
-    let q_price = steps * tick;
-
-    // Truncate size to 6 decimals (token amount scale) to match signed integer scaling.
-    let q_size = size.round_dp_with_strategy(6, rust_decimal::RoundingStrategy::ToZero);
-
+/// Quantize a (price, size) pair for a Polymarket BUY order, matching
+/// `py-clob-client`'s `get_order_amounts` / `ROUNDING_CONFIG`:
+///
+/// - price → banker's-rounded ("round_normal") to the tick's decimal places.
+/// - size  → truncated ("round_down") to 2 decimal places.
+///
+/// Polymarket orders are constrained to size in 0.01-token units; truncating
+/// to 6 dp would let the bot send amounts the CLOB rejects. The tick decimals
+/// table above is the per-market price precision.
+fn quantize_price_and_size(
+    price: Decimal,
+    size: Decimal,
+    tick: Decimal,
+) -> Result<(Decimal, Decimal), ExecutorError> {
+    let price_dp = tick_decimals(tick)?;
+    let q_price =
+        price.round_dp_with_strategy(price_dp, rust_decimal::RoundingStrategy::MidpointNearestEven);
+    let q_size = size.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
     Ok((q_price, q_size))
 }
 
+/// Scale a `Decimal` by `10^scale` and convert to a `U256`. Mirrors
+/// `to_token_decimals` in `py-clob-client/order_builder/helpers.py`: scale
+/// then banker's-round to integer. With the upstream-matching quantization
+/// above (price ≤ 4 dp, size ≤ 2 dp), products always fit in 6 dp so the
+/// rounding step is a no-op, but it stays for defense-in-depth.
 fn decimal_to_u256_scaled(value: Decimal, scale: u32) -> Result<U256, ExecutorError> {
     let factor = Decimal::from_i128_with_scale(10i128.pow(scale), 0);
-    let scaled = (value * factor).round_dp_with_strategy(0, rust_decimal::RoundingStrategy::ToZero);
+    let scaled = (value * factor)
+        .round_dp_with_strategy(0, rust_decimal::RoundingStrategy::MidpointNearestEven);
     let i = scaled
         .to_i128()
         .ok_or_else(|| ExecutorError::OrderRejected("amount scaling overflow".to_string()))?;
@@ -713,6 +741,20 @@ fn decimal_to_u256_scaled(value: Decimal, scale: u32) -> Result<U256, ExecutorEr
         ));
     }
     Ok(U256::from(i as u128))
+}
+
+/// Compute `(maker_amount, taker_amount)` as `U256` token-decimal integers
+/// for a BUY order, applying the same quantization the CLOB expects.
+/// Pinned against `py-clob-client`'s `get_order_amounts` for the BUY branch.
+fn buy_order_amounts(
+    price: Decimal,
+    size: Decimal,
+    tick: Decimal,
+) -> Result<(U256, U256), ExecutorError> {
+    let (q_price, q_size) = quantize_price_and_size(price, size, tick)?;
+    let maker_amount = decimal_to_u256_scaled(q_price * q_size, 6)?;
+    let taker_amount = decimal_to_u256_scaled(q_size, 6)?;
+    Ok((maker_amount, taker_amount))
 }
 
 #[cfg(test)]
@@ -807,6 +849,83 @@ mod tests {
             no_price: dec!(0.50),
             use_fok: true,
         }
+    }
+
+    // ─── BUY order amount quantization — pinned against upstream ──────────
+    //
+    // Reference: `Polymarket/py-clob-client`, `order_builder/builder.py`
+    // (`get_order_amounts`, BUY branch) + `order_builder/helpers.py`
+    // (`round_normal`, `round_down`, `to_token_decimals`). The expected
+    // integer amounts below are computed by hand using the same algorithm.
+
+    #[test]
+    fn buy_amounts_tick_001_basic() {
+        // tick=0.01: round_normal(0.45, 2) = 0.45; round_down(10.0, 2) = 10.0;
+        // raw_maker = 4.5; maker = 4_500_000; taker = 10_000_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.45), dec!(10.0), dec!(0.01)).unwrap();
+        assert_eq!(maker, U256::from(4_500_000u64));
+        assert_eq!(taker, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_size_truncates_to_two_dp() {
+        // tick=0.01, size=10.789 → round_down(size, 2) = 10.78 (NOT 10.79).
+        // raw_maker = 10.78 * 0.50 = 5.39; maker = 5_390_000; taker = 10_780_000.
+        // Catches the previous 6-dp size truncation bug.
+        let (maker, taker) = buy_order_amounts(dec!(0.50), dec!(10.789), dec!(0.01)).unwrap();
+        assert_eq!(maker, U256::from(5_390_000u64));
+        assert_eq!(taker, U256::from(10_780_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_tick_0001_preserves_three_dp_price() {
+        // tick=0.001, price=0.567 (already 3-dp, round_normal is a no-op),
+        // size=12.345 → 12.34. raw_maker = 12.34 * 0.567 = 6.99678.
+        // maker = 6_996_780; taker = 12_340_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.567), dec!(12.345), dec!(0.001)).unwrap();
+        assert_eq!(maker, U256::from(6_996_780u64));
+        assert_eq!(taker, U256::from(12_340_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_tick_00001_preserves_four_dp_price() {
+        // tick=0.0001, price=0.1234, size=10.0. raw_maker = 1.234.
+        // maker = 1_234_000; taker = 10_000_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.1234), dec!(10.0), dec!(0.0001)).unwrap();
+        assert_eq!(maker, U256::from(1_234_000u64));
+        assert_eq!(taker, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_price_quantizes_to_tick_decimals() {
+        // tick=0.01, price=0.4567 → round_normal(0.4567, 2) = 0.46
+        // (3rd decimal 6 > 5, round up). size=10.0. raw_maker = 4.6.
+        // maker = 4_600_000; taker = 10_000_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.4567), dec!(10.0), dec!(0.01)).unwrap();
+        assert_eq!(maker, U256::from(4_600_000u64));
+        assert_eq!(taker, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_tick_01_one_decimal_price() {
+        // tick=0.1, price=0.5, size=10.0 → maker = 5_000_000; taker = 10_000_000.
+        let (maker, taker) = buy_order_amounts(dec!(0.5), dec!(10.0), dec!(0.1)).unwrap();
+        assert_eq!(maker, U256::from(5_000_000u64));
+        assert_eq!(taker, U256::from(10_000_000u64));
+    }
+
+    #[test]
+    fn buy_amounts_rejects_unsupported_tick() {
+        // py-clob-client only defines ROUNDING_CONFIG for {0.1, 0.01, 0.001, 0.0001};
+        // anything else should fail loudly, not silently produce malformed amounts.
+        let err = buy_order_amounts(dec!(0.45), dec!(10.0), dec!(0.005)).unwrap_err();
+        assert!(matches!(err, ExecutorError::OrderRejected(_)));
+    }
+
+    #[test]
+    fn buy_amounts_rejects_zero_or_negative_tick() {
+        assert!(buy_order_amounts(dec!(0.45), dec!(10.0), dec!(0)).is_err());
+        assert!(buy_order_amounts(dec!(0.45), dec!(10.0), dec!(-0.01)).is_err());
     }
 
     #[tokio::test]
