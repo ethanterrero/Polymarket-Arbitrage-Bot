@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod fee_rates;
 pub mod order_signing;
 pub mod proxy_address;
 
@@ -7,6 +8,7 @@ use arb_types::{
     BinaryMarket, ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, SweepExecutionOrder,
 };
 use auth::ApiCredentials;
+use fee_rates::FeeRateCache;
 use k256::ecdsa::SigningKey;
 use order_signing::{Order, OrderSide, SignatureType};
 use primitive_types::{H160, U256};
@@ -56,6 +58,8 @@ pub enum ExecutorError {
     Auth(String),
     #[error("Order rejected: {0}")]
     OrderRejected(String),
+    #[error("fee-rate fetch error: {0}")]
+    FeeRate(#[from] fee_rates::FeeRateError),
 }
 
 /// Represents the order type sent to the CLOB.
@@ -93,6 +97,10 @@ pub struct OrderExecutor {
     creds: Option<ApiCredentials>,
     signing_key: Option<SigningKey>,
     signature_type: SignatureType,
+    /// Per-token-id cache of CLOB `base_fee` rates, fetched lazily before
+    /// signing each order. Replaces the config-derived default that lived
+    /// on `BinaryMarket.fee_rate_bps`.
+    fee_rates: FeeRateCache,
 }
 
 impl OrderExecutor {
@@ -106,6 +114,7 @@ impl OrderExecutor {
             creds: None,
             signing_key: None,
             signature_type: SignatureType::Eoa,
+            fee_rates: FeeRateCache::new(),
         }
     }
 
@@ -156,6 +165,7 @@ impl OrderExecutor {
             creds: Some(creds),
             signing_key: Some(signing_key),
             signature_type,
+            fee_rates: FeeRateCache::new(),
         })
     }
 
@@ -326,8 +336,20 @@ impl OrderExecutor {
         order_type: &OrderType,
     ) -> Result<ClobOrderResponse, ExecutorError> {
         let url = format!("{}/order", self.clob_url);
-        let (body_json, headers) =
-            self.build_signed_order_http_request(market, token_id, price, size, order_type, None, None)?;
+        let fee_rate_bps = self
+            .fee_rates
+            .get(&self.client, &self.clob_url, token_id)
+            .await?;
+        let (body_json, headers) = self.build_signed_order_http_request(
+            market,
+            token_id,
+            price,
+            size,
+            order_type,
+            fee_rate_bps,
+            None,
+            None,
+        )?;
 
         let resp = self
             .client
@@ -357,6 +379,7 @@ impl OrderExecutor {
         price: Decimal,
         size: Decimal,
         order_type: &OrderType,
+        fee_rate_bps: u32,
         fixed_timestamp: Option<&str>,
         fixed_salt: Option<u64>,
     ) -> Result<(String, HeaderMap), ExecutorError> {
@@ -398,7 +421,7 @@ impl OrderExecutor {
             taker_amount,
             expiration: U256::zero(),
             nonce: U256::zero(),
-            fee_rate_bps: U256::from(market.fee_rate_bps),
+            fee_rate_bps: U256::from(fee_rate_bps),
             side: OrderSide::Buy,
             signature_type,
         };
@@ -418,7 +441,7 @@ impl OrderExecutor {
                 taker_amount: taker_amount.to_string(),
                 expiration: "0".to_string(),
                 nonce: "0".to_string(),
-                fee_rate_bps: market.fee_rate_bps.to_string(),
+                fee_rate_bps: fee_rate_bps.to_string(),
                 side: "BUY".to_string(),
                 signature_type: signature_type as u8,
                 signature: sig_hex,
@@ -986,6 +1009,7 @@ mod tests {
             creds: Some(creds),
             signing_key: Some(signing_key),
             signature_type: SignatureType::Eoa,
+            fee_rates: FeeRateCache::new(),
         };
 
         // Force deterministic timestamp + salt so auth signature is stable.
@@ -996,6 +1020,7 @@ mod tests {
                 dec!(0.45),
                 dec!(10.0),
                 &OrderType::Gtc,
+                12,
                 Some("1700000000"),
                 Some(42),
             )
@@ -1017,5 +1042,83 @@ mod tests {
         assert!(resp.status().is_success());
 
         m.assert();
+    }
+
+    #[tokio::test]
+    async fn place_order_resolves_fee_rate_via_clob_and_caches() {
+        use httpmock::Method::GET;
+        let server = MockServer::start();
+
+        // /fee-rate returns base_fee = 17 bps for the queried token.
+        let fee_mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/fee-rate")
+                .query_param("token_id", "1234");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"base_fee":17}"#);
+        });
+
+        // /order accepts and returns success. Capture the body so we can assert
+        // that the fetched fee_rate_bps (17), not the BinaryMarket default (99),
+        // ended up in the signed payload.
+        let order_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/order")
+                .body_includes(r#""feeRateBps":"17""#);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"success":true,"order_id":"abc"}"#);
+        });
+
+        let key_bytes =
+            hex::decode("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+                .unwrap();
+        let signing_key = SigningKey::from_bytes(key_bytes.as_slice().into()).unwrap();
+        let secret = base64::engine::general_purpose::URL_SAFE.encode(b"test-secret-key-32-bytes-padding");
+        let creds = ApiCredentials {
+            api_key: "owner".to_string(),
+            api_secret: secret,
+            api_passphrase: "pass".to_string(),
+            wallet_address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string(),
+        };
+
+        let market = BinaryMarket {
+            condition_id: "cond".to_string(),
+            yes_token_id: "1234".to_string(),
+            no_token_id: "5678".to_string(),
+            question: "q".to_string(),
+            slug: "s".to_string(),
+            active: true,
+            liquidity: None,
+            neg_risk: false,
+            // Stale per-market default — must be ignored in favor of the
+            // /fee-rate fetch.
+            fee_rate_bps: 99,
+            min_tick_size: dec!(0.01),
+        };
+
+        let exec = OrderExecutor {
+            client: reqwest::Client::new(),
+            clob_url: server.url(""),
+            dry_run: false,
+            chain_id: order_signing::contracts::POLYGON_CHAIN_ID,
+            creds: Some(creds),
+            signing_key: Some(signing_key),
+            signature_type: SignatureType::Eoa,
+            fee_rates: FeeRateCache::new(),
+        };
+
+        // First call: /fee-rate hit + /order hit.
+        exec.place_order(&market, "1234", dec!(0.45), dec!(10.0), &OrderType::Gtc)
+            .await
+            .unwrap();
+        // Second call: cache hit, no extra /fee-rate; /order hit again.
+        exec.place_order(&market, "1234", dec!(0.45), dec!(10.0), &OrderType::Gtc)
+            .await
+            .unwrap();
+
+        fee_mock.assert_calls(1);
+        order_mock.assert_calls(2);
     }
 }
