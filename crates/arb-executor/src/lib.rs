@@ -1,3 +1,4 @@
+pub mod allowances;
 pub mod auth;
 pub mod fee_rates;
 pub mod order_signing;
@@ -167,6 +168,46 @@ impl OrderExecutor {
             signature_type,
             fee_rates: FeeRateCache::new(),
         })
+    }
+
+    /// Run the on-chain allowance check using this executor's signing
+    /// identity (EOA + signature type derive the maker address). Logs the
+    /// result and returns Err if any approval is missing.
+    ///
+    /// Threshold is derived from `max_total_exposure_usdc` scaled to USDC
+    /// base units (6 decimals): an approval ≥ this is considered sufficient.
+    /// Returns Err in dry-run mode (no signing identity to check).
+    pub async fn enforce_startup_allowances(
+        &self,
+        polygon_rpc_url: &str,
+        max_total_exposure_usdc: Decimal,
+    ) -> Result<(), String> {
+        let creds = self
+            .creds
+            .as_ref()
+            .ok_or_else(|| "dry-run executor has no signing identity".to_string())?;
+        let eoa = order_signing::parse_address(&creds.wallet_address)
+            .map_err(|e| e.to_string())?;
+
+        let factor = Decimal::from(1_000_000u64);
+        let min_decimal = max_total_exposure_usdc * factor;
+        let min_u128: u128 = min_decimal
+            .round()
+            .to_u128()
+            .ok_or_else(|| "max_total_exposure_usdc too large for u128".to_string())?;
+        let min_u256 = U256::from(min_u128);
+
+        let report = allowances::check_startup_allowances(
+            &self.client,
+            polygon_rpc_url,
+            self.chain_id,
+            eoa,
+            self.signature_type,
+            min_u256,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        allowances::enforce(&report)
     }
 
     /// Execute an arbitrage order (buy YES + buy NO concurrently).
@@ -799,6 +840,7 @@ mod tests {
                 ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
                 chain_id: 137,
                 wallet_address: String::new(),
+                polygon_rpc_url: "https://polygon-rpc.com".to_string(),
             },
             execution: arb_config::ExecutionConfig::default(),
             strategy: arb_config::StrategyConfig {

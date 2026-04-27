@@ -56,6 +56,25 @@ async fn main() -> Result<()> {
         ExecutionMode::Live => {
             let key = AppConfig::load_private_key()?;
             let exec = OrderExecutor::new_live(&config, &key).await?;
+            info!(
+                rpc_url = %config.polymarket.polygon_rpc_url,
+                "Verifying on-chain approvals before enabling live mode..."
+            );
+            if let Err(e) = exec
+                .enforce_startup_allowances(
+                    &config.polymarket.polygon_rpc_url,
+                    config.risk.max_total_exposure_usdc,
+                )
+                .await
+            {
+                error!(
+                    error = %e,
+                    "Live mode blocked: on-chain approvals are not satisfied. \
+                     Approve USDC.e and ConditionalTokens to both Polymarket CTF \
+                     Exchange contracts on Polygon, then restart."
+                );
+                return Err(anyhow::anyhow!("startup allowance check failed: {}", e));
+            }
             info!("execution.mode=live — live trading enabled");
             Arc::new(exec)
         }

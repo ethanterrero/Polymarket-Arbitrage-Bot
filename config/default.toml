@@ -3,6 +3,9 @@ clob_url = "https://clob.polymarket.com"
 gamma_url = "https://gamma-api.polymarket.com"
 ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 chain_id = 137
+# JSON-RPC endpoint for the startup allowance check. Override with your own
+# provider URL (e.g. Alchemy/Infura) if the public RPC rate-limits you.
+polygon_rpc_url = "https://polygon-rpc.com"
 
 [execution]
 # Explicit opt-in. Set to "live" only when you're ready to send authenticated requests.
