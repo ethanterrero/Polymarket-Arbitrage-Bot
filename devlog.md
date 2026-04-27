@@ -351,4 +351,56 @@ Started wiring the full signed-order `/order` payload so live trading can submit
 2. Swap fee rate default for a real per-market `/fee-rate-bps` lookup (cached).
 3. Add startup allowance checks for USDC + CTF approvals before live execution.
 
+---
+
+## 2026-04-26
+
+### What we did
+Closed the three remaining live-trading gates from the 2026-04-25 evening backlog: pinned the BUY amount quantization against `py-clob-client`, replaced the config-derived per-market fee rate with a real `/fee-rate` lookup, and added an on-chain allowance check that fails the bot at startup if approvals aren't in place.
+
+### Quantization (commit 1)
+The previous executor truncated `size` to 6 decimal places and floored `price` to a tick multiple. Polymarket's `py-clob-client` (`get_order_amounts` + `ROUNDING_CONFIG`) uses `round_down(size, 2)` and `round_normal(price, tick_decimals)` instead. For sizes with more than 2 decimals (e.g. `50.7891`) our code would emit a `taker_amount` of `50_789_100` USDC base units. The CLOB only accepts amounts at 0.01-token granularity (`50_780_000`), so any such order was a guaranteed live-mode rejection — fortunately not yet triggered because dry-run still dominates.
+
+The fix:
+- New `tick_decimals` helper mapping `{0.1, 0.01, 0.001, 0.0001} → {1, 2, 3, 4}` (rejects other ticks loud — `py-clob-client`'s `ROUNDING_CONFIG` only defines those four).
+- Price → `MidpointNearestEven` to tick decimals (matches Python's `round()` / `round_normal`).
+- Size → `ToZero` truncation to 2 decimals (matches `round_down(size, 2)`).
+- `decimal_to_u256_scaled` now uses `MidpointNearestEven` at the integer step too (matches `to_token_decimals`); a no-op for these tick configs, kept for defense-in-depth.
+- New `buy_order_amounts` wrapper used by the signed-order builder.
+
+Seven pinned tests, lifted from the upstream algorithm and verified by hand: all four supported ticks, the size-truncation case (against the prior bug), the price-rounding-up case, and the rejections.
+
+### Per-market fee rate fetch (commit 2)
+`Order.feeRateBps` is part of the EIP-712 digest, so a wrong fee rate makes the CLOB silently reject the order. Previously sourced from `StrategyConfig.base_fee_rate` plumbed through `BinaryMarket` — fine for the ~0bps majority but wrong for any market with a non-zero fee.
+
+Matched `py-clob-client`'s `get_fee_rate_bps`:
+- New `fee_rates` module with a `FeeRateCache` keyed by token_id (not condition_id — each outcome token can in principle carry its own fee).
+- Lazily fetches `GET /fee-rate?token_id=<id>` and reads the `base_fee` key. Missing key → 0 (matches `result.get("base_fee") or 0`).
+- HTTP failure bubbles as `ExecutorError::FeeRate` rather than poisoning the cache with 0; subsequent calls retry the network until a real value lands.
+- The executor resolves the fee at `place_order` time and feeds it into `build_signed_order_http_request`. `BinaryMarket.fee_rate_bps` stays on the type for now (used by non-live test paths and `LegOrder` plumbing); the executor is authoritative in live mode.
+
+Five tests cover fetch+cache behavior, the missing-key fallback, the HTTP-error-doesn't-cache rule, distinct-tokens-distinct-rates, and an integration test asserting the executor first hits `/fee-rate`, then sends `/order` with the fetched bps in the signed payload, and that the second call only re-hits `/order`.
+
+### Startup allowance check (commit 3)
+The `maker` on a signed Polymarket order is the funded address (EOA / Magic-Link proxy / Gnosis Safe). It must have approved both CTF Exchange contracts to move its USDC.e (ERC-20 `allowance`) and outcome tokens (CTF `isApprovedForAll`). Without those approvals on-chain, settlement reverts even though the CLOB cheerfully accepts the POST. This adds a startup probe so live mode fails at process boot rather than at first attempted fill.
+
+- New `allowances` module: four Polygon JSON-RPC `eth_call`s (USDC + CTF, against the standard and neg-risk exchanges). Function selectors are inline constants (`0xdd62ed3e` = `allowance(address,address)`, `0xe985e9c5` = `isApprovedForAll(address,address)`); ABI encoding is two left-padded 20-byte addresses. No `ethers-rs` dependency — the dependency cost would dwarf the ~30 lines of encode/decode.
+- USDC.e (`0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`) and CTF (`0x4D97DCd97eC945f40cF65F87097ACe5EA0476045`) addresses are pinned for Polygon mainnet only. Other `chain_id`s return `UnsupportedChain`; we don't have the testnet equivalents pinned and silently passing with the wrong addresses would be worse than failing.
+- `OrderExecutor::enforce_startup_allowances` is the convenience entry point. Threshold is `risk.max_total_exposure_usdc * 10^6` — strict enough to catch revoked-or-tiny approvals, but the standard MAX_UINT256 approval most users have always satisfies it.
+- `arb-bot/main.rs` calls it in the Live branch right after `new_live`. On failure it logs a structured error per missing approval and exits non-zero. Dry-run is unaffected.
+- New `polymarket.polygon_rpc_url` config key, default `https://polygon-rpc.com`. Users hitting the public RPC's rate limits override with their own provider.
+
+Six tests cover non-Polygon chain rejection, happy-path with mocked RPC, missing CTF approval (both exchange rows flagged), insufficient USDC allowance (both flagged), and `enforce`'s Ok/Err semantics.
+
+### Concept learned: reference-vector tests catch silent-failure bugs
+The size-truncation bug existed for as long as the signed-order path did, and the existing test suite passed because the integration test happened to use `size=10.0` — no extra decimals to truncate. The first new test in this PR (`buy_amounts_size_truncates_to_two_dp`) uses `size=10.789`, which is the bug's exact failure shape, and only exists because we cross-referenced `py-clob-client`'s implementation before writing the test. Without that pin, the bug would have surfaced as a CLOB rejection in production — the worst place to discover a wire-format mismatch. Lesson reinforces the 2026-04-25 (afternoon) note about silent-default deserialization: cryptographic and wire-format code is not the place to write your own test inputs.
+
+### State after today
+- `cargo test --workspace` — 47 tests pass (was 33; +14 across the three commits). Zero new warnings from this PR.
+- Branch: `feat/finish-live-execution`.
+- The three blockers from the 2026-04-25 evening "what's next" list are closed. Live trading is now production-capable subject to the user having actually approved the contracts on Polygon (which the new startup check verifies).
+
+### Recommended discipline before first live session
+- Cap `risk.max_order_size_usdc` to a few dollars and `risk.max_total_exposure_usdc` to ~$10–20 for the first run. The new allowance check verifies approvals exist; it doesn't verify the wire format is right end-to-end against a real CLOB. A small-size shakedown is the cheapest way to learn if anything we missed bites.
+- If using a private Polygon RPC, set `polymarket.polygon_rpc_url` explicitly — public-RPC rate limits will surface as `RPC` errors at startup, not as silent failures.
 

@@ -80,7 +80,9 @@ The bot is **event-driven**: it reacts to orderbook updates and only acts when a
 
 - **Dry-run:** Safe default. No key, or failed API-key derivation → logs what would be traded; no signed CLOB orders.
 - **Authenticated HTTP:** With a valid key, the executor attaches **L2 HMAC** headers and posts to `/order`.
-- **Signed order body:** Polymarket’s CLOB expects an EIP-712–signed **Order** struct on the wire. The repository includes **`order_signing.rs`** (reference-tested against Polymarket’s vectors), but **`place_order` still sends a simplified JSON shape** until the devlog backlog item “rewrite `/order` request body + wire signing” is done. Treat **observation and dry-run** as reliable; treat **live fills** as **not guaranteed** until that wiring is complete and validated.
+- **Signed order body:** Polymarket’s CLOB expects an EIP-712–signed **Order** struct on the wire. The full signed payload is wired into `place_order` (`order_signing.rs` reference-tested against Polymarket's vectors; `proxy_address.rs` derives the funded `maker` for both proxy and Gnosis Safe accounts; BUY amount quantization is pinned against `py-clob-client`'s `get_order_amounts`).
+- **Per-market fee rate:** `Order.feeRateBps` is fetched lazily from `GET /fee-rate?token_id=<id>` and cached per token, matching `py-clob-client`'s `get_fee_rate_bps` (the value goes into the EIP-712 digest, so a wrong default would cause silent rejections).
+- **Startup allowance check:** Live mode verifies USDC.e and ConditionalTokens approvals to both CTF Exchange contracts (standard + neg-risk) on Polygon before enabling order placement. Missing approvals fail the bot at boot rather than at first attempted fill.
 
 ---
 
@@ -91,6 +93,7 @@ Edit `config/default.toml` (and optionally override with environment variables u
 | Section | Key | Meaning |
 |---------|-----|---------|
 | **polymarket** | `clob_url`, `gamma_url`, `ws_url`, `chain_id` | CLOB, Gamma, WebSocket endpoints and chain ID. |
+| | `polygon_rpc_url` | Polygon JSON-RPC URL for the startup allowance check (default `https://polygon-rpc.com`; override with your own provider if rate-limited). |
 | **strategy** | `mode` | `simultaneous`, `asymmetric`, or `hybrid`. |
 | | `min_net_spread` | Minimum net spread (after fees) to trade. |
 | | `base_fee_rate` | Fee rate for spread math. |
@@ -130,7 +133,7 @@ The `arb-bot` binary loads `config/default.toml` from the **current working dire
 ### Modes
 
 - **Dry-run:** `execution.mode="dry_run"` → `OrderExecutor::new_dry_run`. Discovers opportunities, runs risk, logs trades; **does not** send real orders.
-- **Live (explicit opt-in):** `execution.mode="live"` and `POLYMARKET_PRIVATE_KEY` set → `OrderExecutor::new_live` and HMAC-authenticated `POST /order`. Until the full signed-order JSON is wired (see devlog), exchange acceptance of those POSTs is **not** treated as production-ready.
+- **Live (explicit opt-in):** `execution.mode="live"` and `POLYMARKET_PRIVATE_KEY` set → `OrderExecutor::new_live`, HMAC-authenticated `POST /order` with a full EIP-712-signed Order body, per-market fee rate fetched from the CLOB, and a Polygon RPC allowance check at startup. **Recommended:** cap `risk.max_order_size_usdc` to a few dollars for the first live session as a small-size shakedown.
 
 ---
 
@@ -161,4 +164,4 @@ The `arb-bot` binary loads `config/default.toml` from the **current working dire
 
 - **What it does:** Finds binary markets where YES ask + NO ask &lt; $1 (after fees) and can execute (or dry-run) buys on both sides, including sweep and asymmetric paths.
 - **How:** Scanner → monitor → strategy → risk → executor; optional inventory for asymmetric/hybrid.
-- **Current state:** Full **detection and risk** pipeline; **CLOB L2 auth** (derive key + HMAC) implemented; **balance** fed from the monitor into risk on an interval; **EIP-712 order signing** implemented in library form with reference tests, **not yet** the body of `place_order`. Use **dry-run** for dependable behavior; follow **[devlog.md](devlog.md)** for the exact sequencing of what comes next.
+- **Current state:** Full **detection and risk** pipeline; **CLOB L2 auth** (derive key + HMAC) implemented; **balance** fed from the monitor into risk on an interval; **EIP-712 order signing** wired into `place_order` with the full signed-Order payload, BUY amount quantization pinned to `py-clob-client`, per-market fee rate fetched and cached, and a startup **allowance check** that fails the bot at boot if USDC.e or ConditionalTokens approvals are missing on Polygon. See **[devlog.md](devlog.md)** for the per-PR rationale.
