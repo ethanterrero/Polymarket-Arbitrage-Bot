@@ -2,6 +2,47 @@
 
 ---
 
+## 2026-05-17 (Phase 2 — Maker pricing in `analyze_asymmetric`)
+
+### What we did
+Replaced the taker-disguised-as-async pricing in `analyze_asymmetric` with real maker pricing. Each leg is now quoted at `best_bid + min_tick_size` (inside the spread) capped at the per-side target — instead of the previous behavior of crossing at the best ask. Combined with Phase 1, these GTC posts now correctly rest on the CLOB.
+
+### Why this was needed
+Phase 1 added the resting-order tracking but didn't change *what price* `analyze_asymmetric` quotes. Without this change, all the resting-order machinery was being fed `best_ask`-priced orders that would never actually rest (they'd cross immediately). This is the change that turns the asymmetric mode from a fancy taker into a maker.
+
+### Key changes
+- **`arb-types`** — new `best_yes_bid` / `best_no_bid` helpers on `BinaryOrderBook` (mirrors the existing ask helpers).
+- **`arb-strategy`** — `analyze_asymmetric` rewritten. Per side:
+  - Compute `target_price` from `asymmetric_target_total_cost - opposite_side_best_ask - fee_overhead` (unchanged math; what changed is where the post lands).
+  - Compute `target_floor = snap_to_tick(target_price, min_tick_size)` so the post price always falls on the CLOB's valid tick grid.
+  - `improved_bid = best_bid + min_tick_size`.
+  - Skip if `improved_bid > target_floor` (queue jump isn't worth the spread loss) OR `improved_bid >= best_ask` (would just become a taker).
+  - Otherwise post at `improved_bid` with `use_fok = false` (must be GTC to rest).
+  - Size is bounded by the resting bid's size — sane upper bound; risk layer clamps further.
+- New helper: `snap_to_tick(price, tick)` floor-rounds to a tick multiple.
+
+### What's intentionally deferred
+- **Sizing strategy.** Current size = best-bid size. Crude but lets us land the pricing change without redesigning sizing. Phase 3's repost loop is the natural home for tier-1/tier-2/tier-3 sizing.
+- **Multi-level posts.** Today posts only at the inside-the-spread tier. Phase 3 can add deeper resting orders if the strategy proves itself.
+
+### Tests
+- 6 new pinned unit tests in `arb-strategy`:
+  - Profitable inside-the-spread post (asserts the exact post price).
+  - Skip-when-improved-bid-exceeds-target (with NO-side qualifying as cross-check).
+  - Skip-when-improved-bid-would-cross-ask.
+  - Target-floor snaps to tick.
+  - Skip side with no resting bid.
+  - `snap_to_tick` direct unit tests.
+
+`cargo test --workspace` — 59 pass (was 53 on main). Build clean, no new warnings.
+
+### State after today
+- Branch: `feat/asymmetric-phase-2-maker-pricing`.
+- Asymmetric mode now produces real maker quotes that will actually rest on the CLOB. Combined with Phase 1, the system can post → poll → fill → pair.
+- Next: Phase 3 — repost stale quotes when the market moves, enforce `max_unpaired_legs_per_market` against resting + filled-unpaired, send IOC closer when a leg fills.
+
+---
+
 ## 2026-04-14
 
 ### What we did

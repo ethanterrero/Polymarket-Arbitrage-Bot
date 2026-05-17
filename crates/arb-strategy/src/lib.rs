@@ -312,10 +312,18 @@ impl ArbitrageDetector {
         Ok(opportunity)
     }
 
-    /// Analyze the book for asymmetric (single-leg) buy opportunities.
+    /// Analyze the book for asymmetric (passive maker) buy opportunities.
     ///
-    /// Returns a `LegOrder` if the best ask on either side is at or below the
-    /// target price given current inventory state.
+    /// For each side, computes the target price that would still pair to a
+    /// profitable closed position given the opposite-side best ask (or
+    /// existing inventory cost). Then chooses a passive post price *inside*
+    /// the current bid-ask spread — specifically `best_bid + min_tick_size`,
+    /// capped at the target — so we get paid the spread when we eventually
+    /// fill, instead of crossing at the ask like a taker.
+    ///
+    /// Returns `LegOrder`s with `use_fok = false` so the executor will post
+    /// them as GTC and they'll rest on the book. Phase 1's resting-order
+    /// tracker picks them up from there.
     pub fn analyze_asymmetric(
         &self,
         book: &BinaryOrderBook,
@@ -332,55 +340,76 @@ impl ArbitrageDetector {
 
         let fee_overhead = self.base_fee_rate * Decimal::new(2, 0) * Decimal::new(5, 1);
         let open_legs = inventory.open_legs.get(&market.condition_id);
+        let tick = market.min_tick_size;
 
         let mut orders = Vec::new();
 
-        // Check YES side.
-        if let Some(yes_ask) = book.best_yes_ask() {
-            let yes_target = compute_leg_target(
-                Side::Yes,
+        for side in [Side::Yes, Side::No] {
+            let target = compute_leg_target(
+                side,
                 self.asymmetric_target,
                 fee_overhead,
                 book,
                 open_legs,
             );
-            if yes_ask.price <= yes_target {
-                orders.push(LegOrder {
-                    condition_id: market.condition_id.clone(),
-                    token_id: market.yes_token_id.clone(),
-                    side: Side::Yes,
-                    size: yes_ask.size,
-                    target_price: yes_ask.price,
-                    use_fok: self.use_fok,
-                    neg_risk: market.neg_risk,
-                    fee_rate_bps: market.fee_rate_bps,
-                    min_tick_size: market.min_tick_size,
-                });
+            if target <= Decimal::ZERO {
+                continue;
             }
-        }
+            let (best_bid, best_ask, token_id) = match side {
+                Side::Yes => (
+                    book.best_yes_bid(),
+                    book.best_yes_ask(),
+                    &market.yes_token_id,
+                ),
+                Side::No => (
+                    book.best_no_bid(),
+                    book.best_no_ask(),
+                    &market.no_token_id,
+                ),
+            };
+            let Some(best_bid) = best_bid else { continue };
 
-        // Check NO side.
-        if let Some(no_ask) = book.best_no_ask() {
-            let no_target = compute_leg_target(
-                Side::No,
-                self.asymmetric_target,
-                fee_overhead,
-                book,
-                open_legs,
-            );
-            if no_ask.price <= no_target {
-                orders.push(LegOrder {
-                    condition_id: market.condition_id.clone(),
-                    token_id: market.no_token_id.clone(),
-                    side: Side::No,
-                    size: no_ask.size,
-                    target_price: no_ask.price,
-                    use_fok: self.use_fok,
-                    neg_risk: market.neg_risk,
-                    fee_rate_bps: market.fee_rate_bps,
-                    min_tick_size: market.min_tick_size,
-                });
+            // Compute the post price. `improved_bid = best_bid + tick`
+            // queue-jumps in front of resting bids; cap at `target` so we
+            // never post above the profitability threshold. Snap the target
+            // floor down to tick granularity so the price is always valid.
+            let target_floor = snap_to_tick(target, tick);
+            let improved_bid = best_bid.price + tick;
+            if improved_bid > target_floor {
+                // Posting at a valid tick that improves the bid would push us
+                // past target — skip the leg, queue improvement isn't worth
+                // the loss in spread capture.
+                continue;
             }
+            // Also never post at or above the best ask (we'd just become a
+            // taker; the simultaneous path already covers that).
+            if let Some(ask) = best_ask {
+                if improved_bid >= ask.price {
+                    continue;
+                }
+            }
+            let post_price = improved_bid;
+
+            // Choose size: bounded by what's already resting at the bid (we
+            // don't want to be the only resting order on a single-bidder
+            // book) plus a fixed sizing baseline so it's never zero. The
+            // risk layer caps this further; this is just a sane upper bound.
+            let post_size = best_bid.size;
+            if post_size <= Decimal::ZERO {
+                continue;
+            }
+
+            orders.push(LegOrder {
+                condition_id: market.condition_id.clone(),
+                token_id: token_id.clone(),
+                side,
+                size: post_size,
+                target_price: post_price,
+                use_fok: false,
+                neg_risk: market.neg_risk,
+                fee_rate_bps: market.fee_rate_bps,
+                min_tick_size: tick,
+            });
         }
 
         if orders.is_empty() {
@@ -391,14 +420,24 @@ impl ArbitrageDetector {
             info!(
                 condition_id = %market.condition_id,
                 side = %order.side,
-                target_price = %order.target_price,
+                post_price = %order.target_price,
                 size = %order.size,
-                "Asymmetric leg opportunity detected"
+                "Asymmetric maker quote prepared"
             );
         }
 
         Ok(orders)
     }
+}
+
+/// Round `price` down to the nearest multiple of `tick`. Used to align a
+/// computed target price onto the CLOB's valid tick grid before posting.
+fn snap_to_tick(price: Decimal, tick: Decimal) -> Decimal {
+    if tick <= Decimal::ZERO {
+        return price;
+    }
+    let n = (price / tick).floor();
+    n * tick
 }
 
 /// Calculate the effective cost to receive 1 token at price p, including fees.
@@ -664,5 +703,162 @@ mod tests {
         let book = make_book(dec!(0.40), dec!(200), dec!(0.50), dec!(30));
         let opp = detector.analyze(&book, &market).unwrap();
         assert_eq!(opp.max_size, dec!(30));
+    }
+
+    // ─── Phase 2: asymmetric (maker) pricing ──────────────────────────────
+
+    /// Build a binary book where each side has explicit best bid + ask. The
+    /// strategy's maker pricing depends on the bid being present, so a
+    /// fixture that only sets asks (like `make_book`) won't exercise the
+    /// maker code path.
+    fn make_book_with_bids(
+        yes_bid: Decimal,
+        yes_bid_size: Decimal,
+        yes_ask: Decimal,
+        yes_ask_size: Decimal,
+        no_bid: Decimal,
+        no_bid_size: Decimal,
+        no_ask: Decimal,
+        no_ask_size: Decimal,
+    ) -> BinaryOrderBook {
+        BinaryOrderBook {
+            condition_id: "test-condition".to_string(),
+            yes_book: TokenOrderBook {
+                token_id: "yes-token".to_string(),
+                side: Side::Yes,
+                asks: vec![PriceLevel {
+                    price: yes_ask,
+                    size: yes_ask_size,
+                }],
+                bids: vec![PriceLevel {
+                    price: yes_bid,
+                    size: yes_bid_size,
+                }],
+            },
+            no_book: TokenOrderBook {
+                token_id: "no-token".to_string(),
+                side: Side::No,
+                asks: vec![PriceLevel {
+                    price: no_ask,
+                    size: no_ask_size,
+                }],
+                bids: vec![PriceLevel {
+                    price: no_bid,
+                    size: no_bid_size,
+                }],
+            },
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn empty_inventory() -> InventorySnapshot {
+        InventorySnapshot::default()
+    }
+
+    #[test]
+    fn asymmetric_posts_inside_spread_at_improved_bid() {
+        // target_total_cost = 0.97, no_ask = 0.50, fee_overhead = 0.
+        // yes_target = 0.97 - 0.50 = 0.47 (snapped to 0.47 at tick=0.01).
+        // yes_bid = 0.40, improved_bid = 0.41 ≤ 0.47 → post at 0.41.
+        let config = make_config(dec!(0.001), dec!(0.0));
+        let detector = ArbitrageDetector::new(&config);
+        let market = make_market();
+        let book = make_book_with_bids(
+            dec!(0.40), dec!(50), dec!(0.55), dec!(20),
+            dec!(0.40), dec!(50), dec!(0.50), dec!(20),
+        );
+
+        let orders = detector
+            .analyze_asymmetric(&book, &market, &empty_inventory())
+            .unwrap();
+        let yes = orders.iter().find(|o| o.side == Side::Yes).unwrap();
+        assert_eq!(yes.target_price, dec!(0.41));
+        assert!(!yes.use_fok, "asymmetric leg orders must be GTC (resting)");
+        assert_eq!(yes.size, dec!(50)); // bounded by best_bid size
+    }
+
+    #[test]
+    fn asymmetric_skips_when_improved_bid_exceeds_target() {
+        // yes_target = 0.97 - no_ask = 0.97 - 0.45 = 0.52.
+        // yes_bid = 0.52 → improved_bid = 0.53 > 0.52 → skip yes side.
+        // no_target = 0.97 - yes_ask = 0.97 - 0.55 = 0.42.
+        // no_bid = 0.30 → improved_bid = 0.31 ≤ 0.42 and < no_ask (0.45) → keep.
+        let config = make_config(dec!(0.001), dec!(0.0));
+        let detector = ArbitrageDetector::new(&config);
+        let market = make_market();
+        let book = make_book_with_bids(
+            dec!(0.52), dec!(50), dec!(0.55), dec!(20),
+            dec!(0.30), dec!(50), dec!(0.45), dec!(20),
+        );
+        let orders = detector
+            .analyze_asymmetric(&book, &market, &empty_inventory())
+            .unwrap();
+        assert!(!orders.iter().any(|o| o.side == Side::Yes));
+        let no = orders.iter().find(|o| o.side == Side::No).unwrap();
+        assert_eq!(no.target_price, dec!(0.31));
+    }
+
+    #[test]
+    fn asymmetric_skips_when_improved_bid_would_cross_ask() {
+        // Tight book: best_yes_bid = 0.40, best_yes_ask = 0.41, tick = 0.01.
+        // improved_bid = 0.41 = best_ask → would be a taker, skip.
+        let config = make_config(dec!(0.001), dec!(0.0));
+        let detector = ArbitrageDetector::new(&config);
+        let market = make_market();
+        let book = make_book_with_bids(
+            dec!(0.40), dec!(50), dec!(0.41), dec!(20),
+            dec!(0.40), dec!(50), dec!(0.50), dec!(20),
+        );
+        let orders = detector
+            .analyze_asymmetric(&book, &market, &empty_inventory())
+            .unwrap();
+        assert!(!orders.iter().any(|o| o.side == Side::Yes));
+    }
+
+    #[test]
+    fn asymmetric_target_snaps_down_to_tick() {
+        // Non-tick-aligned target should never push us above the tick floor.
+        // Setting no_ask = 0.523 → yes_target = 0.97 - 0.523 = 0.447,
+        // floored to 0.44 at tick = 0.01.
+        // yes_bid = 0.43, improved_bid = 0.44 ≤ 0.44 → post at 0.44.
+        let config = make_config(dec!(0.001), dec!(0.0));
+        let detector = ArbitrageDetector::new(&config);
+        let market = make_market();
+        let book = make_book_with_bids(
+            dec!(0.43), dec!(50), dec!(0.55), dec!(20),
+            dec!(0.50), dec!(50), dec!(0.523), dec!(20),
+        );
+        let orders = detector
+            .analyze_asymmetric(&book, &market, &empty_inventory())
+            .unwrap();
+        let yes = orders.iter().find(|o| o.side == Side::Yes).unwrap();
+        assert_eq!(yes.target_price, dec!(0.44));
+    }
+
+    #[test]
+    fn asymmetric_skips_side_without_bid() {
+        // No bid present on yes book → no maker quote possible for yes side.
+        let config = make_config(dec!(0.001), dec!(0.0));
+        let detector = ArbitrageDetector::new(&config);
+        let market = make_market();
+        let mut book = make_book_with_bids(
+            dec!(0.40), dec!(50), dec!(0.55), dec!(20),
+            dec!(0.40), dec!(50), dec!(0.50), dec!(20),
+        );
+        book.yes_book.bids.clear();
+        let orders = detector
+            .analyze_asymmetric(&book, &market, &empty_inventory())
+            .unwrap();
+        assert!(!orders.iter().any(|o| o.side == Side::Yes));
+        assert!(orders.iter().any(|o| o.side == Side::No));
+    }
+
+    #[test]
+    fn snap_to_tick_floors_down() {
+        assert_eq!(snap_to_tick(dec!(0.523), dec!(0.01)), dec!(0.52));
+        assert_eq!(snap_to_tick(dec!(0.50), dec!(0.01)), dec!(0.50));
+        assert_eq!(snap_to_tick(dec!(0.4999), dec!(0.001)), dec!(0.499));
+        // Negative tick → identity (defensive, shouldn't happen in practice).
+        assert_eq!(snap_to_tick(dec!(0.5), dec!(0)), dec!(0.5));
     }
 }
