@@ -2,6 +2,24 @@
 
 ---
 
+## 2026-05-17 (Phase 0 — Asymmetric maker-mode thesis)
+
+### What we did
+Added `docs/ASYMMETRIC_MAKER_THESIS.md` ahead of writing any maker-mode code. It exists so the configuration knobs and risk-control choices in Phases 1–5 have a written-down justification we can argue with later.
+
+### Why this came first
+The simultaneous arb path requires beating other arbers to a crossed orderbook. We don't have a latency edge. Asymmetric (passive maker) mode flips the dependency — we post inside the spread and get paid for waiting, in exchange for adverse selection and inventory risk. None of that requires being fast. But the strategy only makes sense if the captured spread on closed pairs exceeds the realized loss on unwinds, and that ratio depends on which markets we post in. The thesis spells out why mid-tier liquidity, calm-phase, far-from-resolution markets are the only ones worth posting in for v0.
+
+### Recommended config defaults (for first live session)
+Documented in the thesis and pasted here for grep-ability: `asymmetric_target_total_cost = 0.97`, `min_net_spread = 0.02`, `max_unpaired_hold_secs = 1800`, `max_unpaired_legs_per_market = 1`, `asymmetric_repost_interval_secs = 60` (new in Phase 3), `unwind_max_loss_usdc = 5.0` (new in Phase 4), `max_order_size_usdc = 5.0`, `max_total_exposure_usdc = 25.0`, `scanner.min_24h_volume_usdc = 1000.0`, `scanner.min_secs_to_resolution = 259200`.
+
+### State after today
+- No code changed. `cargo test --workspace` still green at 53 tests.
+- Branch: `feat/asymmetric-phase-0-thesis`.
+- Next: Phase 1 (resting-order tracking) — the load-bearing PR everything else depends on.
+
+---
+
 ## 2026-04-14
 
 ### What we did
