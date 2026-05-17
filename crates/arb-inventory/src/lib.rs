@@ -1,3 +1,5 @@
+pub mod resting;
+
 use arb_types::{InventorySnapshot, OpenLeg, PairedPosition, Side};
 use chrono::Utc;
 use rust_decimal::Decimal;
@@ -5,6 +7,8 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 use tracing::info;
 use uuid::Uuid;
+
+pub use resting::RestingOrderBook;
 
 /// Manages unpaired leg inventory and pairing logic.
 pub struct InventoryManager {
