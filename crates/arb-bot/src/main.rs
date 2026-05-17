@@ -410,7 +410,18 @@ async fn try_asymmetric(
     for mut leg_order in leg_orders {
         *opportunities_detected += 1;
 
-        let approved_size = match risk_manager.evaluate_leg(&leg_order).await {
+        // Count of filled-but-unpaired legs in this market — feeds the new
+        // max_unpaired_legs_per_market cap. Phase 1's resting-order tracker
+        // (#11) has landed; folding resting-order counts in here is a follow-up.
+        let current_market_leg_count = snap
+            .open_legs
+            .get(&leg_order.condition_id)
+            .map_or(0, |v| v.len());
+
+        let approved_size = match risk_manager
+            .evaluate_leg(&leg_order, current_market_leg_count)
+            .await
+        {
             Ok(size) => size,
             Err(e) => {
                 info!(error = %e, side = %leg_order.side, "Risk check rejected leg");

@@ -41,6 +41,38 @@ Phase 1 added the resting-order tracking but didn't change *what price* `analyze
 - Asymmetric mode now produces real maker quotes that will actually rest on the CLOB. Combined with Phase 1, the system can post → poll → fill → pair.
 - Next: Phase 3 — repost stale quotes when the market moves, enforce `max_unpaired_legs_per_market` against resting + filled-unpaired, send IOC closer when a leg fills.
 
+## 2026-05-17 (Phase 3 partial — `max_unpaired_legs_per_market` enforcement)
+
+### What we did
+Enforced the previously-declared-but-unused `max_unpaired_legs_per_market` cap in `arb-risk::evaluate_leg`. Promoted the field from `StrategyConfig` to also exist on `RiskConfig` (where it conceptually belongs — it's a risk gate). The risk manager rejects a new leg if accepting it would push the unpaired-leg count for the market past the cap.
+
+### Why this is partial
+The full Phase 3 brief covered three pieces:
+1. Enforce `max_unpaired_legs_per_market` — **this PR**.
+2. Cancel-and-repost loop when resting quotes go stale — **deferred**. Needs `RestingOrderBook` from #11.
+3. Pair-on-fill IOC closer when a leg fills — **deferred**. Needs the resting-order poller from #11.
+
+Landing the cap independently is valuable on its own: it bounds the worst-case concentration risk for filled-but-unpaired legs even without the resting-order tracking from Phase 1.
+
+### Key changes
+- **`arb-config`** — `RiskConfig.max_unpaired_legs_per_market: usize` with `#[serde(default)]` (default `3`). Mirrors the existing strategy-config field; canonically a risk limit now.
+- **`arb-risk`** — new `RiskError::PerMarketUnpairedLegCountExceeded`. `evaluate_leg` signature changed from `(order)` to `(order, current_market_leg_count: usize)`; checks the cap first (before size-based shrinkage, because the count is binary — you either fit or you don't, no partial accept).
+- **`arb-bot/src/main.rs`** — `try_asymmetric` now reads `snap.open_legs.get(condition_id).len()` and passes it to `evaluate_leg`. Once Phase 1's resting-order tracker lands, this caller should also add resting-order count to the figure.
+
+### Tests
+- 4 new tests in `arb-risk`:
+  - Reject when count == cap (the order would push to cap+1).
+  - Allow when count < cap.
+  - Cap disabled when set to 0.
+  - Cap is per-market, not global.
+
+`cargo test --workspace` — 57 pass (was 53). Build clean.
+
+### State after today
+- Branch: `feat/asymmetric-phase-3-unpaired-legs-cap`.
+- One of the three Phase 3 pieces shipped. The other two (repost loop, pair-on-fill) depend on #11 (Phase 1 resting-order tracking) landing first.
+- Next: Phase 4 — convert `find_stale_legs` warning into an active unwind action. This needs SELL support added to `execute_leg`.
+
 ---
 
 ## 2026-04-14

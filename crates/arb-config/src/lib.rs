@@ -134,6 +134,12 @@ pub struct RiskConfig {
     pub max_unpaired_exposure_usdc: Decimal,
     #[serde(default = "default_risk_unpaired_per_market")]
     pub max_unpaired_per_market_usdc: Decimal,
+    /// Maximum number of unpaired legs (filled or resting) the bot may hold
+    /// in a single market. Defends the asymmetric strategy against
+    /// concentration risk: if any one market locks up, the failure mode is
+    /// bounded by this cap times the per-leg size.
+    #[serde(default = "default_risk_unpaired_legs_per_market")]
+    pub max_unpaired_legs_per_market: usize,
 }
 
 fn default_risk_unpaired_exposure() -> Decimal {
@@ -142,6 +148,10 @@ fn default_risk_unpaired_exposure() -> Decimal {
 
 fn default_risk_unpaired_per_market() -> Decimal {
     Decimal::new(50, 0) // 50.0
+}
+
+fn default_risk_unpaired_legs_per_market() -> usize {
+    3
 }
 
 #[derive(Debug, Clone, Deserialize)]

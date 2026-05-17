@@ -36,6 +36,12 @@ pub enum RiskError {
         projected: Decimal,
         max: Decimal,
     },
+    #[error("Per-market unpaired-leg count would be {projected}, exceeds max {max} for {condition_id}")]
+    PerMarketUnpairedLegCountExceeded {
+        condition_id: String,
+        projected: usize,
+        max: usize,
+    },
 }
 
 /// Tracks risk state for the bot.
@@ -319,8 +325,19 @@ impl RiskManager {
         Ok(order)
     }
 
-    /// Evaluate a single-leg buy against risk limits including unpaired exposure.
-    pub async fn evaluate_leg(&self, order: &LegOrder) -> Result<Decimal, RiskError> {
+    /// Evaluate a single-leg buy against risk limits including unpaired
+    /// exposure and unpaired-leg-count caps.
+    ///
+    /// `current_market_leg_count` is the number of existing unpaired legs
+    /// (filled-but-unpaired plus resting, once Phase 1's resting tracker is
+    /// in) the bot already holds for this market. Pass `0` if you don't
+    /// track resting orders yet; the cap will still defend against filled-
+    /// unpaired concentration via the count caller passes in.
+    pub async fn evaluate_leg(
+        &self,
+        order: &LegOrder,
+        current_market_leg_count: usize,
+    ) -> Result<Decimal, RiskError> {
         let state = self.state.read().await;
         let now = Utc::now();
 
@@ -328,6 +345,20 @@ impl RiskManager {
             return Err(RiskError::TooManyPositions {
                 current: state.open_positions,
                 max: self.config.max_concurrent_positions,
+            });
+        }
+
+        // Per-market unpaired-leg count cap. Checked before the size-based
+        // checks below because adding even a single approved leg pushes the
+        // count by one; if we're already at the cap, no size shrinkage
+        // makes the order acceptable.
+        if self.config.max_unpaired_legs_per_market > 0
+            && current_market_leg_count + 1 > self.config.max_unpaired_legs_per_market
+        {
+            return Err(RiskError::PerMarketUnpairedLegCountExceeded {
+                condition_id: order.condition_id.clone(),
+                projected: current_market_leg_count + 1,
+                max: self.config.max_unpaired_legs_per_market,
             });
         }
 
@@ -510,6 +541,21 @@ mod tests {
             max_concurrent_positions: 10,
             max_unpaired_exposure_usdc: dec!(200),
             max_unpaired_per_market_usdc: dec!(50),
+            max_unpaired_legs_per_market: 3,
+        }
+    }
+
+    fn make_leg(condition_id: &str, size: Decimal, price: Decimal) -> LegOrder {
+        LegOrder {
+            condition_id: condition_id.to_string(),
+            token_id: "tok".to_string(),
+            side: arb_types::Side::Yes,
+            size,
+            target_price: price,
+            use_fok: false,
+            neg_risk: false,
+            fee_rate_bps: 0,
+            min_tick_size: dec!(0.01),
         }
     }
 
@@ -609,5 +655,63 @@ mod tests {
         let order = make_order(dec!(10), dec!(0.45), dec!(0.50));
         let result = rm.evaluate(order).await;
         assert!(matches!(result, Err(RiskError::TooManyPositions { .. })));
+    }
+
+    // ─── Phase 3: max_unpaired_legs_per_market enforcement ────────────────
+
+    #[tokio::test]
+    async fn evaluate_leg_rejects_when_market_at_leg_cap() {
+        let rm = RiskManager::new(&make_config()); // cap = 3
+        rm.update_balance(dec!(500)).await;
+        let leg = make_leg("m1", dec!(10), dec!(0.45));
+
+        let err = rm.evaluate_leg(&leg, 3).await.unwrap_err();
+        match err {
+            RiskError::PerMarketUnpairedLegCountExceeded {
+                condition_id,
+                projected,
+                max,
+            } => {
+                assert_eq!(condition_id, "m1");
+                assert_eq!(projected, 4);
+                assert_eq!(max, 3);
+            }
+            other => panic!("expected PerMarketUnpairedLegCountExceeded, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn evaluate_leg_allows_when_below_leg_cap() {
+        let rm = RiskManager::new(&make_config());
+        rm.update_balance(dec!(500)).await;
+        let leg = make_leg("m1", dec!(10), dec!(0.45));
+
+        // 2 existing + 1 new = 3 ≤ 3 → allowed.
+        let approved = rm.evaluate_leg(&leg, 2).await.unwrap();
+        assert!(approved > Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn evaluate_leg_cap_disabled_when_zero() {
+        let mut cfg = make_config();
+        cfg.max_unpaired_legs_per_market = 0;
+        let rm = RiskManager::new(&cfg);
+        rm.update_balance(dec!(500)).await;
+        let leg = make_leg("m1", dec!(10), dec!(0.45));
+
+        // With cap=0, even huge existing leg counts pass.
+        let approved = rm.evaluate_leg(&leg, 99).await.unwrap();
+        assert!(approved > Decimal::ZERO);
+    }
+
+    #[tokio::test]
+    async fn evaluate_leg_cap_is_per_market_not_global() {
+        // current_market_leg_count is for ONE market — a different market
+        // with its own leg count is independently evaluated.
+        let rm = RiskManager::new(&make_config());
+        rm.update_balance(dec!(500)).await;
+        let leg = make_leg("m2", dec!(10), dec!(0.45));
+        let approved = rm.evaluate_leg(&leg, 0).await.unwrap();
+        assert!(approved > Decimal::ZERO);
     }
 }

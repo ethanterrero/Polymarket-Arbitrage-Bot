@@ -1000,6 +1000,7 @@ mod tests {
                 max_concurrent_positions: 10,
                 max_unpaired_exposure_usdc: dec!(200),
                 max_unpaired_per_market_usdc: dec!(50),
+                max_unpaired_legs_per_market: 3,
             },
             scanner: arb_config::ScannerConfig {
                 refresh_interval_secs: 300,
