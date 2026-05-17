@@ -311,6 +311,8 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: 0,
             min_tick_size: dec!(0.01),
+            volume_24h: None,
+            end_date: None,
         }
     }
 

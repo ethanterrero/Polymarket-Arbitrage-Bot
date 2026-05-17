@@ -153,6 +153,16 @@ pub struct ScannerConfig {
     /// Leave empty to scan all markets.
     #[serde(default)]
     pub market_keywords: Vec<String>,
+    /// Skip markets with reported 24h volume below this. `0` disables the
+    /// filter. Used to avoid posting maker quotes in dormant markets where
+    /// orders would rest forever.
+    #[serde(default)]
+    pub min_24h_volume_usdc: Decimal,
+    /// Skip markets resolving in fewer than this many seconds. `0` disables
+    /// the filter. Phase 5: defends against the adverse-selection spike that
+    /// usually precedes resolution.
+    #[serde(default)]
+    pub min_secs_to_resolution: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

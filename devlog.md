@@ -41,6 +41,43 @@ Phase 1 added the resting-order tracking but didn't change *what price* `analyze
 - Asymmetric mode now produces real maker quotes that will actually rest on the CLOB. Combined with Phase 1, the system can post → poll → fill → pair.
 - Next: Phase 3 — repost stale quotes when the market moves, enforce `max_unpaired_legs_per_market` against resting + filled-unpaired, send IOC closer when a leg fills.
 
+## 2026-05-17 (Phase 5 — Scanner filters for maker mode)
+
+### What we did
+Added two opt-in filters to the market scanner so the maker strategy doesn't waste resting orders on dormant markets or markets about to resolve. Both default to disabled (`0`), preserving existing behavior; opt in via config.
+
+### Why this was needed
+The thesis (Phase 0) calls out two failure modes the strategy doesn't otherwise defend against:
+- **Dormant markets**: a maker quote in a market with no recent trades just sits forever. Capital tied up, no fills.
+- **Resolution-imminent markets**: in the last few hours before resolution, every cross is much more likely to be from someone with better info than us. Adverse-selection risk dominates.
+
+The scanner is the cheapest place to filter these — one decision at market-list assembly time vs. running checks on every orderbook event.
+
+### Key changes
+- **`arb-types`** — added `volume_24h: Option<Decimal>` and `end_date: Option<DateTime<Utc>>` to `BinaryMarket`. Optional because Gamma omits them on some markets; we'd rather keep a slightly under-described market than reject everything.
+- **`arb-config`** — added `scanner.min_24h_volume_usdc` and `scanner.min_secs_to_resolution` with `#[serde(default)]` so existing configs keep working. Defaults are `0` / `0` = disabled.
+- **`arb-scanner`** — parse `volume24hrClob` (canonical) with `volume24hr` fallback, plus `endDate` (RFC3339). Apply filters in `parse_binary_market`:
+  - Volume filter: if `min_24h_volume > 0` and the reported volume is below it, drop. Markets with no reported volume are kept (rejecting them too would drop too much of the universe).
+  - Resolution filter: if `min_secs_to_resolution > 0` and `end_date` is in the future but closer than that, drop. Markets with no end_date or already-past end_date are kept (Gamma's `closed=true` filter already handles resolved markets).
+- **`config/default.toml`** — documents both new keys at `0` (disabled), with recommended values for maker mode in comments.
+
+### What's intentionally deferred
+- **Spread-aware filter.** The Phase 5 brief mentioned a `min_bid_ask_spread` filter, but that depends on current orderbook state (not market metadata), so it belongs in the strategy layer rather than the scanner. Punted to a later phase or merged into the Phase 3 repost-decision logic.
+- **Per-market fee-rate filter.** Thesis says "refuse to post if `fee_rate_bps > 50`". That filter would belong on the strategy side (uses the lazy-cached value from `FeeRateCache`), not the scanner. Punted.
+
+### Tests
+- 10 new tests in `arb-scanner`:
+  - Volume drops low-volume; keeps high-volume; falls back to legacy field name; keeps when volume unreported; disabled when threshold is zero.
+  - Resolution drops imminent; keeps far-off; keeps when end_date missing; ignores past end_dates.
+  - Round-trip deserialization of `volume24hrClob` + `endDate` from a representative JSON blob.
+
+`cargo test --workspace` — 63 pass (was 53 on main). Clean build.
+
+### State after today
+- Branch: `feat/asymmetric-phase-5-market-filters`.
+- Scanner now produces a maker-mode-appropriate market list when the operator opts into the filters. Combined with the recommended config from Phase 0's thesis, this drops the candidate set from "every active binary market" to "calm, liquid, far-from-resolution markets."
+- Next: Phase 3 — repost loop + enforce `max_unpaired_legs_per_market` + pair-on-fill closing taker.
+
 ---
 
 ## 2026-04-14

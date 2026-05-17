@@ -187,6 +187,7 @@ dependencies = [
  "anyhow",
  "arb-config",
  "arb-types",
+ "chrono",
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",

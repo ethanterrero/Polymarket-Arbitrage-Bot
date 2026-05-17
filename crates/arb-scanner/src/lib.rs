@@ -1,5 +1,6 @@
 use arb_config::AppConfig;
 use arb_types::BinaryMarket;
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -43,6 +44,16 @@ struct GammaMarketResponse {
     /// Minimum tick size as a JSON number (e.g. `0.01` or `0.001`).
     #[serde(default, rename = "orderPriceMinTickSize")]
     order_price_min_tick_size: Option<Decimal>,
+    /// Trailing 24-hour traded volume. Gamma uses several field names
+    /// historically; we accept `volume24hrClob` (canonical for CLOB markets)
+    /// first, then fall back to `volume24hr`.
+    #[serde(default, rename = "volume24hrClob")]
+    volume_24h_clob: Option<Decimal>,
+    #[serde(default, rename = "volume24hr")]
+    volume_24h: Option<Decimal>,
+    /// Scheduled resolution time. RFC3339, e.g. `"2026-06-01T00:00:00Z"`.
+    #[serde(default, rename = "endDate")]
+    end_date: Option<DateTime<Utc>>,
 }
 
 /// Default tick size used when Gamma omits `orderPriceMinTickSize`. Most
@@ -59,6 +70,10 @@ pub struct MarketScanner {
     /// `strategy.base_fee_rate`. TODO: replace with per-market rates fetched
     /// from the CLOB `/fee-rate-bps` endpoint when wiring the order body.
     default_fee_rate_bps: u32,
+    /// Skip markets with 24h volume below this. `0` disables.
+    min_24h_volume: Decimal,
+    /// Skip markets within this many seconds of resolution. `0` disables.
+    min_secs_to_resolution: u64,
     markets: Arc<RwLock<Vec<BinaryMarket>>>,
 }
 
@@ -71,6 +86,8 @@ impl MarketScanner {
             max_markets: config.scanner.max_markets,
             min_liquidity: config.scanner.min_liquidity_usdc,
             default_fee_rate_bps,
+            min_24h_volume: config.scanner.min_24h_volume_usdc,
+            min_secs_to_resolution: config.scanner.min_secs_to_resolution,
             markets: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -172,6 +189,32 @@ impl MarketScanner {
 
         let neg_risk = raw.neg_risk.unwrap_or(false);
         let min_tick_size = raw.order_price_min_tick_size.unwrap_or(DEFAULT_MIN_TICK_SIZE);
+        let volume_24h = raw.volume_24h_clob.or(raw.volume_24h);
+        let end_date = raw.end_date;
+
+        // 24h volume filter: skip dormant markets. When Gamma omits the
+        // field we keep the market — the alternative (rejecting all
+        // unreported volumes) would drop too much of the universe.
+        if self.min_24h_volume > Decimal::ZERO {
+            match volume_24h {
+                Some(v) if v < self.min_24h_volume => return None,
+                _ => {}
+            }
+        }
+
+        // Time-to-resolution filter: skip markets resolving too soon. When
+        // end_date is missing or already in the past we keep the market
+        // (Gamma's `closed=true` filter above already removed resolved
+        // markets, so a missing end_date here is most likely an unscheduled
+        // market rather than one that's silently about to resolve).
+        if self.min_secs_to_resolution > 0 {
+            if let Some(end) = end_date {
+                let secs_left = (end - Utc::now()).num_seconds();
+                if secs_left > 0 && (secs_left as u64) < self.min_secs_to_resolution {
+                    return None;
+                }
+            }
+        }
 
         Some(BinaryMarket {
             condition_id,
@@ -184,6 +227,8 @@ impl MarketScanner {
             neg_risk,
             fee_rate_bps: self.default_fee_rate_bps,
             min_tick_size,
+            volume_24h,
+            end_date,
         })
     }
 
@@ -297,5 +342,133 @@ mod tests {
         let raw: GammaMarketResponse = serde_json::from_str(json).unwrap();
         assert_eq!(raw.neg_risk, None);
         assert_eq!(raw.order_price_min_tick_size, None);
+    }
+
+    // ─── Phase 5: scanner filters ─────────────────────────────────────────
+
+    fn make_scanner_with_filters(min_volume: Decimal, min_secs: u64) -> MarketScanner {
+        MarketScanner {
+            client: reqwest::Client::new(),
+            gamma_url: "https://test".to_string(),
+            max_markets: 100,
+            min_liquidity: dec!(0),
+            default_fee_rate_bps: 0,
+            min_24h_volume: min_volume,
+            min_secs_to_resolution: min_secs,
+            markets: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    fn make_raw(
+        condition_id: &str,
+        volume_24hr_clob: Option<&str>,
+        volume_24hr: Option<&str>,
+        end_date: Option<&str>,
+    ) -> GammaMarketResponse {
+        GammaMarketResponse {
+            condition_id: Some(condition_id.to_string()),
+            question: Some("Q?".to_string()),
+            slug: Some("slug".to_string()),
+            active: Some(true),
+            closed: Some(false),
+            clob_token_ids: Some(r#"["1","2"]"#.to_string()),
+            liquidity: Some("10000".to_string()),
+            neg_risk: Some(false),
+            order_price_min_tick_size: Some(dec!(0.01)),
+            volume_24h_clob: volume_24hr_clob.and_then(|s| s.parse().ok()),
+            volume_24h: volume_24hr.and_then(|s| s.parse().ok()),
+            end_date: end_date.and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(Into::into)),
+        }
+    }
+
+    #[test]
+    fn volume_filter_drops_low_volume_markets() {
+        let scanner = make_scanner_with_filters(dec!(1000), 0);
+        let raw = make_raw("0xabc", Some("500"), None, None);
+        assert!(scanner.parse_binary_market(raw).is_none());
+    }
+
+    #[test]
+    fn volume_filter_keeps_high_volume_markets() {
+        let scanner = make_scanner_with_filters(dec!(1000), 0);
+        let raw = make_raw("0xabc", Some("5000"), None, None);
+        let m = scanner.parse_binary_market(raw).unwrap();
+        assert_eq!(m.volume_24h, Some(dec!(5000)));
+    }
+
+    #[test]
+    fn volume_filter_falls_back_to_legacy_field() {
+        // volume24hrClob missing, volume24hr present.
+        let scanner = make_scanner_with_filters(dec!(1000), 0);
+        let raw = make_raw("0xabc", None, Some("5000"), None);
+        let m = scanner.parse_binary_market(raw).unwrap();
+        assert_eq!(m.volume_24h, Some(dec!(5000)));
+    }
+
+    #[test]
+    fn volume_filter_keeps_market_when_volume_missing() {
+        // Don't drop everything Gamma fails to report on; safer to keep.
+        let scanner = make_scanner_with_filters(dec!(1000), 0);
+        let raw = make_raw("0xabc", None, None, None);
+        assert!(scanner.parse_binary_market(raw).is_some());
+    }
+
+    #[test]
+    fn volume_filter_disabled_when_threshold_is_zero() {
+        let scanner = make_scanner_with_filters(dec!(0), 0);
+        let raw = make_raw("0xabc", Some("0.1"), None, None);
+        assert!(scanner.parse_binary_market(raw).is_some());
+    }
+
+    #[test]
+    fn resolution_filter_drops_imminent_markets() {
+        let scanner = make_scanner_with_filters(dec!(0), 3 * 24 * 3600); // 72h
+        let in_1h = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let raw = make_raw("0xabc", None, None, Some(&in_1h));
+        assert!(scanner.parse_binary_market(raw).is_none());
+    }
+
+    #[test]
+    fn resolution_filter_keeps_far_off_markets() {
+        let scanner = make_scanner_with_filters(dec!(0), 3 * 24 * 3600);
+        let in_30d = (Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        let raw = make_raw("0xabc", None, None, Some(&in_30d));
+        let m = scanner.parse_binary_market(raw).unwrap();
+        assert!(m.end_date.is_some());
+    }
+
+    #[test]
+    fn resolution_filter_keeps_market_with_no_end_date() {
+        // Gamma's `closed=true` filter already removes resolved markets, so a
+        // missing end_date is more likely a long-tail unscheduled market
+        // than something silently about to resolve.
+        let scanner = make_scanner_with_filters(dec!(0), 3 * 24 * 3600);
+        let raw = make_raw("0xabc", None, None, None);
+        assert!(scanner.parse_binary_market(raw).is_some());
+    }
+
+    #[test]
+    fn resolution_filter_ignores_past_dates() {
+        // end_date in the past → don't apply the filter (market is presumably
+        // resolved/closing imminently; let other filters or `closed` deal).
+        let scanner = make_scanner_with_filters(dec!(0), 3 * 24 * 3600);
+        let past = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        let raw = make_raw("0xabc", None, None, Some(&past));
+        assert!(scanner.parse_binary_market(raw).is_some());
+    }
+
+    #[test]
+    fn deserializes_volume_and_end_date_fields() {
+        let json = r#"{
+            "conditionId": "0xabc",
+            "active": true,
+            "closed": false,
+            "clobTokenIds": "[\"1\",\"2\"]",
+            "volume24hrClob": "12345.67",
+            "endDate": "2026-12-31T23:59:00Z"
+        }"#;
+        let raw: GammaMarketResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(raw.volume_24h_clob, Some(dec!(12345.67)));
+        assert!(raw.end_date.is_some());
     }
 }

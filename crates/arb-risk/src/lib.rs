@@ -528,6 +528,8 @@ mod tests {
                     neg_risk: false,
                     fee_rate_bps: 0,
                     min_tick_size: dec!(0.01),
+                    volume_24h: None,
+                    end_date: None,
                 },
                 yes_ask_price: yes_price,
                 no_ask_price: no_price,

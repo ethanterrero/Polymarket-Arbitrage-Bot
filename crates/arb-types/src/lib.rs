@@ -32,6 +32,16 @@ pub struct BinaryMarket {
     /// Minimum order price increment for this market (e.g. 0.01 or 0.001).
     /// Limit prices on the CLOB must be a multiple of this.
     pub min_tick_size: Decimal,
+    /// Trailing 24-hour traded volume in USDC, as reported by Gamma. None when
+    /// Gamma omits the field. Used by Phase 5 scanner filters to skip
+    /// dormant markets where passive maker quotes would never fill.
+    #[serde(default)]
+    pub volume_24h: Option<Decimal>,
+    /// Scheduled market resolution time. None when Gamma omits the field.
+    /// Used by the scanner to skip resolution-imminent markets where
+    /// adverse-selection risk dominates.
+    #[serde(default)]
+    pub end_date: Option<DateTime<Utc>>,
 }
 
 /// A single price level in an orderbook (price + available size).

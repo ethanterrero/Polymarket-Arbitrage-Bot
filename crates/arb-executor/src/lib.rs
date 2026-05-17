@@ -718,6 +718,8 @@ impl OrderExecutor {
             neg_risk: order.neg_risk,
             fee_rate_bps: order.fee_rate_bps,
             min_tick_size: order.min_tick_size,
+            volume_24h: None,
+            end_date: None,
         };
 
         match self
@@ -1006,6 +1008,8 @@ mod tests {
                 max_markets: 200,
                 min_liquidity_usdc: dec!(100),
                 market_keywords: Vec::new(),
+                min_24h_volume_usdc: dec!(0),
+                min_secs_to_resolution: 0,
             },
             monitor: arb_config::MonitorConfig {
                 use_websocket: true,
@@ -1036,6 +1040,8 @@ mod tests {
                     neg_risk: false,
                     fee_rate_bps: 0,
                     min_tick_size: dec!(0.01),
+                    volume_24h: None,
+                    end_date: None,
                 },
                 yes_ask_price: dec!(0.45),
                 no_ask_price: dec!(0.50),
@@ -1179,6 +1185,8 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: 12,
             min_tick_size: dec!(0.01),
+            volume_24h: None,
+            end_date: None,
         };
 
         let exec = OrderExecutor {
@@ -1276,6 +1284,8 @@ mod tests {
             // /fee-rate fetch.
             fee_rate_bps: 99,
             min_tick_size: dec!(0.01),
+            volume_24h: None,
+            end_date: None,
         };
 
         let exec = OrderExecutor {
