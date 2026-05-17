@@ -448,6 +448,14 @@ impl RiskManager {
                     "Recorded leg fill"
                 );
             }
+            LegExecutionResult::Resting { order, order_id, .. } => {
+                debug!(
+                    condition_id = %order.condition_id,
+                    side = %order.side,
+                    order_id = %order_id,
+                    "Leg resting on the book"
+                );
+            }
             LegExecutionResult::NoFill { order, reason } => {
                 debug!(
                     condition_id = %order.condition_id,

@@ -141,6 +141,14 @@ pub struct MonitorConfig {
     pub use_websocket: bool,
     pub poll_interval_ms: u64,
     pub max_concurrent_requests: usize,
+    /// Interval at which the bot polls the CLOB for status updates on resting
+    /// (GTC) leg orders. Smaller = faster pairing reaction, more API calls.
+    #[serde(default = "default_resting_order_poll_interval")]
+    pub resting_order_poll_interval_secs: u64,
+}
+
+fn default_resting_order_poll_interval() -> u64 {
+    10
 }
 
 #[derive(Debug, Clone, Deserialize)]

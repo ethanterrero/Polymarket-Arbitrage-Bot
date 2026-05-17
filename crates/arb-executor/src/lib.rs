@@ -6,7 +6,8 @@ pub mod proxy_address;
 
 use arb_config::AppConfig;
 use arb_types::{
-    BinaryMarket, ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, SweepExecutionOrder,
+    BinaryMarket, ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, OrderState,
+    OrderStatus, SweepExecutionOrder,
 };
 use auth::ApiCredentials;
 use fee_rates::FeeRateCache;
@@ -676,6 +677,11 @@ impl OrderExecutor {
     }
 
     /// Execute a single-leg buy order.
+    ///
+    /// For FOK orders, a `success=true` response means the order matched
+    /// immediately and we return `Filled`. For GTC orders, `success=true`
+    /// means the order was accepted onto the CLOB book — we return `Resting`
+    /// with the assigned `order_id` so the bot's poller can track it.
     pub async fn execute_leg(&self, order: LegOrder) -> LegExecutionResult {
         if self.dry_run {
             info!(
@@ -719,16 +725,31 @@ impl OrderExecutor {
             .await
         {
             Ok(resp) => {
-                if resp.success {
-                    let fill_cost = order.target_price * order.size;
-                    LegExecutionResult::Filled {
-                        fill_size: order.size,
-                        fill_cost,
-                        order,
-                    }
-                } else {
+                if !resp.success {
                     let reason = resp.error_msg.unwrap_or_else(|| "unknown".to_string());
-                    LegExecutionResult::NoFill { order, reason }
+                    return LegExecutionResult::NoFill { order, reason };
+                }
+                match order_type {
+                    OrderType::Fok => {
+                        let fill_cost = order.target_price * order.size;
+                        LegExecutionResult::Filled {
+                            order_id: resp.order_id,
+                            fill_size: order.size,
+                            fill_cost,
+                            order,
+                        }
+                    }
+                    OrderType::Gtc => match resp.order_id {
+                        Some(order_id) => LegExecutionResult::Resting {
+                            order,
+                            order_id,
+                            posted_at: chrono::Utc::now(),
+                        },
+                        None => LegExecutionResult::Error {
+                            error: "CLOB accepted GTC order but returned no order_id".to_string(),
+                            order,
+                        },
+                    },
                 }
             }
             Err(e) => LegExecutionResult::Error {
@@ -736,6 +757,121 @@ impl OrderExecutor {
                 order,
             },
         }
+    }
+
+    /// Cancel a resting order by id. Sends `DELETE /order/{order_id}` with the
+    /// usual HMAC auth headers. Returns Ok on 2xx; treats 404 as Ok (already
+    /// gone) so the caller can use this idempotently from the poller.
+    pub async fn cancel_order(&self, order_id: &str) -> Result<(), ExecutorError> {
+        if self.dry_run {
+            info!(order_id, "[DRY RUN] Would cancel order");
+            return Ok(());
+        }
+        let creds = self
+            .creds
+            .as_ref()
+            .ok_or_else(|| ExecutorError::Auth("API credentials not configured".to_string()))?;
+
+        let path = format!("/order/{}", order_id);
+        let url = format!("{}{}", self.clob_url, path);
+        let headers = auth::build_auth_headers(creds, "DELETE", &path, "")
+            .map_err(|e| ExecutorError::Auth(e.to_string()))?;
+
+        let resp = self.client.delete(&url).headers(headers).send().await?;
+        let status = resp.status();
+        if status.is_success() || status.as_u16() == 404 {
+            return Ok(());
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(ExecutorError::Api {
+            status: status.as_u16(),
+            body,
+        })
+    }
+
+    /// Fetch live status for a single order. Sends `GET /order/{order_id}`
+    /// with HMAC auth and parses the response into an `OrderStatus`.
+    pub async fn get_order_status(&self, order_id: &str) -> Result<OrderStatus, ExecutorError> {
+        if self.dry_run {
+            return Err(ExecutorError::Auth(
+                "cannot fetch order status in dry-run mode".to_string(),
+            ));
+        }
+        let creds = self
+            .creds
+            .as_ref()
+            .ok_or_else(|| ExecutorError::Auth("API credentials not configured".to_string()))?;
+
+        let path = format!("/order/{}", order_id);
+        let url = format!("{}{}", self.clob_url, path);
+        let headers = auth::build_auth_headers(creds, "GET", &path, "")
+            .map_err(|e| ExecutorError::Auth(e.to_string()))?;
+
+        let resp = self.client.get(&url).headers(headers).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ExecutorError::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        let raw: ClobOrderStatusResponse = resp.json().await?;
+        Ok(parse_order_status(order_id, raw))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClobOrderStatusResponse {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    size_matched: Option<String>,
+    #[serde(default)]
+    original_size: Option<String>,
+    #[serde(default, rename = "size")]
+    size_field: Option<String>,
+    #[serde(default)]
+    price: Option<String>,
+    #[serde(default)]
+    avg_fill_price: Option<String>,
+}
+
+fn parse_order_status(order_id: &str, raw: ClobOrderStatusResponse) -> OrderStatus {
+    let state = match raw
+        .status
+        .as_deref()
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+    {
+        Some("LIVE") | Some("OPEN") => OrderState::Live,
+        Some("MATCHED") | Some("FILLED") => OrderState::Matched,
+        Some("CANCELED") | Some("CANCELLED") => OrderState::Cancelled,
+        _ => OrderState::Unknown,
+    };
+    let size_matched = raw
+        .size_matched
+        .as_deref()
+        .and_then(|s| s.parse::<Decimal>().ok())
+        .unwrap_or(Decimal::ZERO);
+    let original_size = raw
+        .original_size
+        .as_deref()
+        .or(raw.size_field.as_deref())
+        .and_then(|s| s.parse::<Decimal>().ok())
+        .unwrap_or(Decimal::ZERO);
+    let avg_fill_price = raw
+        .avg_fill_price
+        .as_deref()
+        .or(raw.price.as_deref())
+        .and_then(|s| s.parse::<Decimal>().ok());
+    OrderStatus {
+        order_id: order_id.to_string(),
+        state,
+        size_matched,
+        original_size,
+        avg_fill_price,
     }
 }
 
@@ -875,6 +1011,7 @@ mod tests {
                 use_websocket: true,
                 poll_interval_ms: 2000,
                 max_concurrent_requests: 20,
+                resting_order_poll_interval_secs: 10,
             },
             logging: arb_config::LoggingConfig {
                 level: "info".to_string(),
@@ -1162,5 +1299,247 @@ mod tests {
 
         fee_mock.assert_calls(1);
         order_mock.assert_calls(2);
+    }
+
+    // ─── Phase 1: resting orders, cancel, status polling ──────────────────
+
+    fn make_live_executor_for(server_url: String) -> OrderExecutor {
+        let key_bytes =
+            hex::decode("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
+                .unwrap();
+        let signing_key = SigningKey::from_bytes(key_bytes.as_slice().into()).unwrap();
+        let secret = base64::engine::general_purpose::URL_SAFE
+            .encode(b"test-secret-key-32-bytes-padding");
+        let creds = ApiCredentials {
+            api_key: "test-owner".to_string(),
+            api_secret: secret,
+            api_passphrase: "pass".to_string(),
+            wallet_address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".to_string(),
+        };
+        OrderExecutor {
+            client: reqwest::Client::new(),
+            clob_url: server_url,
+            dry_run: false,
+            chain_id: order_signing::contracts::POLYGON_CHAIN_ID,
+            creds: Some(creds),
+            signing_key: Some(signing_key),
+            signature_type: SignatureType::Eoa,
+            fee_rates: FeeRateCache::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_order_sends_delete_with_hmac_headers() {
+        use httpmock::Method::DELETE;
+        let server = MockServer::start();
+
+        let m = server.mock(|when, then| {
+            when.method(DELETE)
+                .path("/order/abc-123")
+                .header_exists("POLY_SIGNATURE")
+                .header_exists("POLY_API_KEY")
+                .header_exists("POLY_TIMESTAMP")
+                .header_exists("POLY_PASSPHRASE")
+                .header_exists("POLY_ADDRESS");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"canceled":["abc-123"]}"#);
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        exec.cancel_order("abc-123").await.unwrap();
+        m.assert();
+    }
+
+    #[tokio::test]
+    async fn cancel_order_treats_404_as_success() {
+        use httpmock::Method::DELETE;
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(DELETE).path("/order/gone");
+            then.status(404).body("not found");
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        assert!(exec.cancel_order("gone").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancel_order_surfaces_non_2xx_non_404_errors() {
+        use httpmock::Method::DELETE;
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(DELETE).path("/order/bad");
+            then.status(500).body("kaboom");
+        });
+        let exec = make_live_executor_for(server.url(""));
+        let err = exec.cancel_order("bad").await.unwrap_err();
+        match err {
+            ExecutorError::Api { status, .. } => assert_eq!(status, 500),
+            other => panic!("expected Api error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_order_status_parses_live_payload() {
+        use httpmock::Method::GET;
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/order/abc")
+                .header_exists("POLY_SIGNATURE")
+                .header_exists("POLY_API_KEY");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"status":"LIVE","size_matched":"0","original_size":"10","price":"0.45"}"#,
+                );
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        let s = exec.get_order_status("abc").await.unwrap();
+        assert_eq!(s.state, OrderState::Live);
+        assert_eq!(s.size_matched, dec!(0));
+        assert_eq!(s.original_size, dec!(10));
+    }
+
+    #[tokio::test]
+    async fn get_order_status_parses_matched_payload_with_avg_fill() {
+        use httpmock::Method::GET;
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/order/abc");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    r#"{"status":"MATCHED","size_matched":"10","original_size":"10","avg_fill_price":"0.4523"}"#,
+                );
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        let s = exec.get_order_status("abc").await.unwrap();
+        assert_eq!(s.state, OrderState::Matched);
+        assert_eq!(s.size_matched, dec!(10));
+        assert_eq!(s.avg_fill_price, Some(dec!(0.4523)));
+    }
+
+    #[tokio::test]
+    async fn get_order_status_maps_unknown_status_string() {
+        use httpmock::Method::GET;
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/order/abc");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"status":"WEIRD","size_matched":"0","original_size":"1"}"#);
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        let s = exec.get_order_status("abc").await.unwrap();
+        assert_eq!(s.state, OrderState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn execute_leg_gtc_success_returns_resting() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/fee-rate")
+                .query_param("token_id", "1234");
+            then.status(200).body(r#"{"base_fee":0}"#);
+        });
+        server.mock(|when, then| {
+            when.method(POST).path("/order");
+            then.status(200).body(r#"{"success":true,"order_id":"resting-xyz"}"#);
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        let leg = arb_types::LegOrder {
+            condition_id: "cond".to_string(),
+            token_id: "1234".to_string(),
+            side: arb_types::Side::Yes,
+            size: dec!(10),
+            target_price: dec!(0.45),
+            use_fok: false,
+            neg_risk: false,
+            fee_rate_bps: 0,
+            min_tick_size: dec!(0.01),
+        };
+        let res = exec.execute_leg(leg).await;
+        match res {
+            LegExecutionResult::Resting { order_id, .. } => assert_eq!(order_id, "resting-xyz"),
+            other => panic!("expected Resting, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_leg_fok_success_returns_filled_with_order_id() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/fee-rate")
+                .query_param("token_id", "1234");
+            then.status(200).body(r#"{"base_fee":0}"#);
+        });
+        server.mock(|when, then| {
+            when.method(POST).path("/order");
+            then.status(200).body(r#"{"success":true,"order_id":"fok-xyz"}"#);
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        let leg = arb_types::LegOrder {
+            condition_id: "cond".to_string(),
+            token_id: "1234".to_string(),
+            side: arb_types::Side::Yes,
+            size: dec!(10),
+            target_price: dec!(0.45),
+            use_fok: true,
+            neg_risk: false,
+            fee_rate_bps: 0,
+            min_tick_size: dec!(0.01),
+        };
+        let res = exec.execute_leg(leg).await;
+        match res {
+            LegExecutionResult::Filled {
+                order_id,
+                fill_size,
+                ..
+            } => {
+                assert_eq!(order_id.as_deref(), Some("fok-xyz"));
+                assert_eq!(fill_size, dec!(10));
+            }
+            other => panic!("expected Filled, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_leg_gtc_without_order_id_returns_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/fee-rate")
+                .query_param("token_id", "1234");
+            then.status(200).body(r#"{"base_fee":0}"#);
+        });
+        server.mock(|when, then| {
+            when.method(POST).path("/order");
+            then.status(200).body(r#"{"success":true}"#);
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        let leg = arb_types::LegOrder {
+            condition_id: "cond".to_string(),
+            token_id: "1234".to_string(),
+            side: arb_types::Side::Yes,
+            size: dec!(10),
+            target_price: dec!(0.45),
+            use_fok: false,
+            neg_risk: false,
+            fee_rate_bps: 0,
+            min_tick_size: dec!(0.01),
+        };
+        let res = exec.execute_leg(leg).await;
+        assert!(matches!(res, LegExecutionResult::Error { .. }));
     }
 }
