@@ -161,6 +161,20 @@ impl InventoryManager {
         }
     }
 
+    /// Remove an open leg by id. Returns the removed leg, or None if no
+    /// match. Used by the Phase 4 unwinder to clear inventory after the
+    /// CLOB confirms the closing SELL has filled.
+    pub async fn remove_open_leg(&self, condition_id: &str, leg_id: Uuid) -> Option<OpenLeg> {
+        let mut state = self.state.write().await;
+        let legs = state.open_legs.get_mut(condition_id)?;
+        let pos = legs.iter().position(|l| l.id == leg_id)?;
+        let removed = legs.remove(pos);
+        if legs.is_empty() {
+            state.open_legs.remove(condition_id);
+        }
+        Some(removed)
+    }
+
     /// Find stale open legs exceeding the max hold duration.
     pub async fn find_stale_legs(&self) -> Vec<OpenLeg> {
         let state = self.state.read().await;
@@ -301,5 +315,34 @@ mod tests {
         // With max_hold=0, the leg is immediately stale.
         let stale = mgr.find_stale_legs().await;
         assert_eq!(stale.len(), 1);
+    }
+
+    // ─── Phase 4: remove_open_leg for the unwinder ────────────────────────
+
+    #[tokio::test]
+    async fn remove_open_leg_removes_matching_leg() {
+        let mgr = InventoryManager::new(3600);
+        mgr.record_leg_fill("m1", "yes-tok", Side::Yes, dec!(50), dec!(0.45))
+            .await;
+
+        let leg_id = mgr.snapshot().await.open_legs["m1"][0].id;
+        let removed = mgr.remove_open_leg("m1", leg_id).await.unwrap();
+        assert_eq!(removed.id, leg_id);
+        assert!(mgr.snapshot().await.open_legs.get("m1").is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_open_leg_returns_none_when_market_missing() {
+        let mgr = InventoryManager::new(3600);
+        let bogus = Uuid::new_v4();
+        assert!(mgr.remove_open_leg("nope", bogus).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_open_leg_returns_none_when_leg_id_unknown() {
+        let mgr = InventoryManager::new(3600);
+        mgr.record_leg_fill("m1", "yes-tok", Side::Yes, dec!(50), dec!(0.45))
+            .await;
+        assert!(mgr.remove_open_leg("m1", Uuid::new_v4()).await.is_none());
     }
 }

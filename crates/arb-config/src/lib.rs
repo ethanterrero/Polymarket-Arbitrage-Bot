@@ -101,6 +101,16 @@ pub struct StrategyConfig {
     pub max_unpaired_exposure_usdc: Decimal,
     #[serde(default = "default_max_unpaired_legs")]
     pub max_unpaired_legs_per_market: usize,
+    /// Maximum loss (in USDC) the auto-unwinder may realize on a single
+    /// stale leg. If the projected loss at the opposite-side bid exceeds
+    /// this, the unwinder logs an alert and leaves the leg alone for the
+    /// operator to handle manually. Set to `0` to disable auto-unwind.
+    #[serde(default = "default_unwind_max_loss")]
+    pub unwind_max_loss_usdc: Decimal,
+}
+
+fn default_unwind_max_loss() -> Decimal {
+    Decimal::new(5, 0) // 5.0
 }
 
 fn default_min_sweep_profit() -> Decimal {

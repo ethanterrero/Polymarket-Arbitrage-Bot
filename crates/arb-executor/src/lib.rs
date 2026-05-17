@@ -7,7 +7,7 @@ pub mod proxy_address;
 use arb_config::AppConfig;
 use arb_types::{
     BinaryMarket, ExecutionOrder, ExecutionResult, LegExecutionResult, LegOrder, OrderState,
-    OrderStatus, SweepExecutionOrder,
+    OrderStatus, SweepExecutionOrder, TradeDirection,
 };
 use auth::ApiCredentials;
 use fee_rates::FeeRateCache;
@@ -248,13 +248,14 @@ impl OrderExecutor {
             OrderType::Gtc
         };
 
-        // Place both legs concurrently.
+        // Place both legs concurrently — simultaneous arb is always BUY.
         let yes_future = self.place_order(
             &order.opportunity.market,
             &order.opportunity.market.yes_token_id,
             order.yes_price,
             order.approved_size,
             &order_type,
+            TradeDirection::Buy,
         );
 
         let no_future = self.place_order(
@@ -263,6 +264,7 @@ impl OrderExecutor {
             order.no_price,
             order.approved_size,
             &order_type,
+            TradeDirection::Buy,
         );
 
         let (yes_result, no_result) = tokio::join!(yes_future, no_future);
@@ -368,7 +370,7 @@ impl OrderExecutor {
         }
     }
 
-    /// Place a single buy order on the CLOB.
+    /// Place a single order on the CLOB. `direction` selects Buy vs Sell.
     async fn place_order(
         &self,
         market: &BinaryMarket,
@@ -376,6 +378,7 @@ impl OrderExecutor {
         price: Decimal,
         size: Decimal,
         order_type: &OrderType,
+        direction: TradeDirection,
     ) -> Result<ClobOrderResponse, ExecutorError> {
         let url = format!("{}/order", self.clob_url);
         let fee_rate_bps = self
@@ -391,6 +394,7 @@ impl OrderExecutor {
             fee_rate_bps,
             None,
             None,
+            direction,
         )?;
 
         let resp = self
@@ -424,6 +428,7 @@ impl OrderExecutor {
         fee_rate_bps: u32,
         fixed_timestamp: Option<&str>,
         fixed_salt: Option<u64>,
+        direction: TradeDirection,
     ) -> Result<(String, HeaderMap), ExecutorError> {
         let creds = self
             .creds
@@ -444,8 +449,10 @@ impl OrderExecutor {
         let signature_type = self.signature_type;
         let maker = proxy_address::derive_maker_address(signer, signature_type);
 
-        let (maker_amount, taker_amount) =
-            buy_order_amounts(price, size, market.min_tick_size)?;
+        let (maker_amount, taker_amount) = match direction {
+            TradeDirection::Buy => buy_order_amounts(price, size, market.min_tick_size)?,
+            TradeDirection::Sell => sell_order_amounts(price, size, market.min_tick_size)?,
+        };
 
         let token_u256 = U256::from_dec_str(token_id.trim()).map_err(|_| {
             ExecutorError::OrderRejected(format!("invalid token_id (not a uint256): {}", token_id))
@@ -464,7 +471,10 @@ impl OrderExecutor {
             expiration: U256::zero(),
             nonce: U256::zero(),
             fee_rate_bps: U256::from(fee_rate_bps),
-            side: OrderSide::Buy,
+            side: match direction {
+                TradeDirection::Buy => OrderSide::Buy,
+                TradeDirection::Sell => OrderSide::Sell,
+            },
             signature_type,
         };
 
@@ -484,7 +494,7 @@ impl OrderExecutor {
                 expiration: "0".to_string(),
                 nonce: "0".to_string(),
                 fee_rate_bps: fee_rate_bps.to_string(),
-                side: "BUY".to_string(),
+                side: direction.to_string(),
                 signature_type: signature_type as u8,
                 signature: sig_hex,
             },
@@ -585,6 +595,7 @@ impl OrderExecutor {
             order.yes_limit_price,
             order.approved_size,
             &order_type,
+            TradeDirection::Buy,
         );
         let no_future = self.place_order(
             &order.opportunity.market,
@@ -592,6 +603,7 @@ impl OrderExecutor {
             order.no_limit_price,
             order.approved_size,
             &order_type,
+            TradeDirection::Buy,
         );
 
         let (yes_result, no_result) = tokio::join!(yes_future, no_future);
@@ -721,7 +733,14 @@ impl OrderExecutor {
         };
 
         match self
-            .place_order(&market, &order.token_id, order.target_price, order.size, &order_type)
+            .place_order(
+                &market,
+                &order.token_id,
+                order.target_price,
+                order.size,
+                &order_type,
+                order.direction,
+            )
             .await
         {
             Ok(resp) => {
@@ -957,6 +976,24 @@ fn buy_order_amounts(
     Ok((maker_amount, taker_amount))
 }
 
+/// `(maker_amount, taker_amount)` for a SELL order. SELL swaps the
+/// semantics relative to BUY: the maker now offers *tokens* and asks for
+/// *USDC* in return.
+///
+/// Pinned against `py-clob-client`'s `get_order_amounts` SELL branch
+/// (`order_builder/builder.py`): same price/size quantization, but the
+/// scaled values land in the opposite struct fields.
+fn sell_order_amounts(
+    price: Decimal,
+    size: Decimal,
+    tick: Decimal,
+) -> Result<(U256, U256), ExecutorError> {
+    let (q_price, q_size) = quantize_price_and_size(price, size, tick)?;
+    let maker_amount = decimal_to_u256_scaled(q_size, 6)?;
+    let taker_amount = decimal_to_u256_scaled(q_price * q_size, 6)?;
+    Ok((maker_amount, taker_amount))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,6 +1028,7 @@ mod tests {
                 max_unpaired_hold_secs: 3600,
                 max_unpaired_exposure_usdc: dec!(200),
                 max_unpaired_legs_per_market: 3,
+                unwind_max_loss_usdc: dec!(5),
             },
             risk: arb_config::RiskConfig {
                 max_order_size_usdc: dec!(50),
@@ -1203,6 +1241,7 @@ mod tests {
                 12,
                 Some("1700000000"),
                 Some(42),
+                TradeDirection::Buy,
             )
             .unwrap();
 
@@ -1290,11 +1329,11 @@ mod tests {
         };
 
         // First call: /fee-rate hit + /order hit.
-        exec.place_order(&market, "1234", dec!(0.45), dec!(10.0), &OrderType::Gtc)
+        exec.place_order(&market, "1234", dec!(0.45), dec!(10.0), &OrderType::Gtc, TradeDirection::Buy)
             .await
             .unwrap();
         // Second call: cache hit, no extra /fee-rate; /order hit again.
-        exec.place_order(&market, "1234", dec!(0.45), dec!(10.0), &OrderType::Gtc)
+        exec.place_order(&market, "1234", dec!(0.45), dec!(10.0), &OrderType::Gtc, TradeDirection::Buy)
             .await
             .unwrap();
 
@@ -1466,6 +1505,7 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: 0,
             min_tick_size: dec!(0.01),
+            direction: arb_types::TradeDirection::Buy,
         };
         let res = exec.execute_leg(leg).await;
         match res {
@@ -1499,6 +1539,7 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: 0,
             min_tick_size: dec!(0.01),
+            direction: arb_types::TradeDirection::Buy,
         };
         let res = exec.execute_leg(leg).await;
         match res {
@@ -1539,8 +1580,69 @@ mod tests {
             neg_risk: false,
             fee_rate_bps: 0,
             min_tick_size: dec!(0.01),
+            direction: arb_types::TradeDirection::Buy,
         };
         let res = exec.execute_leg(leg).await;
         assert!(matches!(res, LegExecutionResult::Error { .. }));
+    }
+
+    // ─── Phase 4: SELL order amount math + wire format ─────────────────────
+
+    #[test]
+    fn sell_amounts_swaps_maker_taker_relative_to_buy() {
+        // For SELL at price=0.45, size=10.0, tick=0.01:
+        // BUY  would be  maker = 4.5 USDC,  taker = 10.0 tokens.
+        // SELL inverts:  maker = 10.0 tokens, taker = 4.5 USDC.
+        let (maker, taker) = sell_order_amounts(dec!(0.45), dec!(10.0), dec!(0.01)).unwrap();
+        assert_eq!(maker, U256::from(10_000_000u64));
+        assert_eq!(taker, U256::from(4_500_000u64));
+    }
+
+    #[test]
+    fn sell_amounts_size_truncates_to_two_dp_same_as_buy() {
+        // size=10.789 → round_down to 10.78.
+        // SELL: maker = 10.78 tokens, taker = 10.78 * 0.50 = 5.39 USDC.
+        let (maker, taker) = sell_order_amounts(dec!(0.50), dec!(10.789), dec!(0.01)).unwrap();
+        assert_eq!(maker, U256::from(10_780_000u64));
+        assert_eq!(taker, U256::from(5_390_000u64));
+    }
+
+    #[test]
+    fn sell_amounts_rejects_unsupported_tick() {
+        assert!(sell_order_amounts(dec!(0.45), dec!(10.0), dec!(0.005)).is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_leg_sell_sends_sell_side_in_body() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/fee-rate")
+                .query_param("token_id", "1234");
+            then.status(200).body(r#"{"base_fee":0}"#);
+        });
+        let order_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/order")
+                .body_includes(r#""side":"SELL""#);
+            then.status(200).body(r#"{"success":true,"order_id":"sell-xyz"}"#);
+        });
+
+        let exec = make_live_executor_for(server.url(""));
+        let leg = arb_types::LegOrder {
+            condition_id: "cond".to_string(),
+            token_id: "1234".to_string(),
+            side: arb_types::Side::Yes,
+            size: dec!(10),
+            target_price: dec!(0.45),
+            use_fok: true,
+            neg_risk: false,
+            fee_rate_bps: 0,
+            min_tick_size: dec!(0.01),
+            direction: TradeDirection::Sell,
+        };
+        let res = exec.execute_leg(leg).await;
+        assert!(matches!(res, LegExecutionResult::Filled { .. }));
+        order_mock.assert();
     }
 }

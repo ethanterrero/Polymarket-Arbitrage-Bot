@@ -492,6 +492,31 @@ impl RiskManager {
             *entry = (*entry - paired_cost).max(Decimal::ZERO);
         }
     }
+
+    /// Reduce unpaired exposure when the unwinder closes a stale leg.
+    /// `original_cost` is what we paid to acquire the leg; `recovered` is
+    /// what the SELL returned. Total-exposure is also reduced by the
+    /// original cost so subsequent risk checks see the new headroom.
+    pub async fn record_unwind(
+        &self,
+        condition_id: &str,
+        original_cost: Decimal,
+        recovered: Decimal,
+    ) {
+        let mut state = self.state.write().await;
+        state.unpaired_exposure = (state.unpaired_exposure - original_cost).max(Decimal::ZERO);
+        state.total_exposure = (state.total_exposure - original_cost).max(Decimal::ZERO);
+        if let Some(entry) = state.per_market_unpaired.get_mut(condition_id) {
+            *entry = (*entry - original_cost).max(Decimal::ZERO);
+        }
+        info!(
+            condition_id = %condition_id,
+            original_cost = %original_cost,
+            recovered = %recovered,
+            realized_pnl = %(recovered - original_cost),
+            "Unwind recorded"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -609,5 +634,40 @@ mod tests {
         let order = make_order(dec!(10), dec!(0.45), dec!(0.50));
         let result = rm.evaluate(order).await;
         assert!(matches!(result, Err(RiskError::TooManyPositions { .. })));
+    }
+
+    // ─── Phase 4: record_unwind decrements exposure counters ───────────────
+
+    #[tokio::test]
+    async fn record_unwind_decrements_exposure() {
+        let rm = RiskManager::new(&make_config());
+        // Simulate a previous filled leg: USDC 4.50 unpaired, total_exposure 4.50.
+        {
+            let mut state = rm.state.write().await;
+            state.unpaired_exposure = dec!(4.50);
+            state.total_exposure = dec!(4.50);
+            state
+                .per_market_unpaired
+                .insert("m1".to_string(), dec!(4.50));
+        }
+
+        // Unwind realized at $4.00 (small loss).
+        rm.record_unwind("m1", dec!(4.50), dec!(4.00)).await;
+
+        let state = rm.state.read().await;
+        assert_eq!(state.unpaired_exposure, dec!(0));
+        assert_eq!(state.total_exposure, dec!(0));
+        assert_eq!(state.per_market_unpaired["m1"], dec!(0));
+    }
+
+    #[tokio::test]
+    async fn record_unwind_does_not_underflow_negative() {
+        // If unpaired_exposure is already 0, recording an unwind should
+        // floor at 0, not produce a negative.
+        let rm = RiskManager::new(&make_config());
+        rm.record_unwind("m1", dec!(5), dec!(3)).await;
+        let state = rm.state.read().await;
+        assert_eq!(state.unpaired_exposure, dec!(0));
+        assert_eq!(state.total_exposure, dec!(0));
     }
 }

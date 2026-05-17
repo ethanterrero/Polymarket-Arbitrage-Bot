@@ -199,22 +199,53 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Spawn stale leg monitor (60s interval).
+    // Spawn stale-leg unwinder (60s interval). For each leg older than
+    // max_unpaired_hold_secs: fetch the current opposite-side bid, compute
+    // realized P&L if we sold there, and either send a SELL to close the
+    // leg or log an alert if the projected loss exceeds
+    // strategy.unwind_max_loss_usdc.
     let inventory_for_stale = inventory.clone();
+    let monitor_for_stale = monitor.clone();
+    let executor_for_stale = executor.clone();
+    let risk_for_stale = risk_manager.clone();
+    let market_lookup_for_stale = market_lookup.clone();
+    let unwind_max_loss = config.strategy.unwind_max_loss_usdc;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
             let stale = inventory_for_stale.find_stale_legs().await;
-            for leg in &stale {
-                warn!(
-                    condition_id = %leg.condition_id,
-                    side = %leg.side,
-                    size = %leg.size,
-                    avg_cost = %leg.avg_cost,
-                    acquired_at = %leg.acquired_at,
-                    "Stale unpaired leg detected"
-                );
+            for leg in stale {
+                let market = {
+                    let lookup = market_lookup_for_stale.read().await;
+                    match lookup.get(&leg.condition_id) {
+                        Some(m) => m.clone(),
+                        None => {
+                            warn!(
+                                condition_id = %leg.condition_id,
+                                "Stale leg in unknown market — cannot unwind"
+                            );
+                            continue;
+                        }
+                    }
+                };
+                if let Err(e) = attempt_unwind(
+                    &leg,
+                    &market,
+                    &monitor_for_stale,
+                    &executor_for_stale,
+                    &inventory_for_stale,
+                    &risk_for_stale,
+                    unwind_max_loss,
+                )
+                .await
+                {
+                    warn!(
+                        condition_id = %leg.condition_id,
+                        error = %e,
+                        "Stale leg unwind failed"
+                    );
+                }
             }
         }
     });
@@ -583,6 +614,88 @@ async fn poll_resting_orders(
             OrderState::Live | OrderState::Unknown => {}
         }
     }
+}
+
+/// Try to close a stale unpaired leg by sending an IOC SELL at the
+/// opposite-side best bid. Refuses to act if the projected loss exceeds
+/// `unwind_max_loss_usdc` — operator can handle those manually.
+///
+/// "Opposite-side best bid" is the bid for the same token we hold (someone
+/// willing to buy our YES/NO outcome), not the other binary side. We sell
+/// the same token we acquired.
+async fn attempt_unwind(
+    leg: &arb_types::OpenLeg,
+    market: &BinaryMarket,
+    monitor: &Arc<PriceMonitor>,
+    executor: &Arc<OrderExecutor>,
+    inventory: &Arc<InventoryManager>,
+    risk_manager: &Arc<RiskManager>,
+    unwind_max_loss: rust_decimal::Decimal,
+) -> Result<()> {
+    let book = monitor.fetch_binary_book(market).await?;
+    let best_bid = match leg.side {
+        arb_types::Side::Yes => book.best_yes_bid(),
+        arb_types::Side::No => book.best_no_bid(),
+    };
+    let Some(bid) = best_bid else {
+        warn!(
+            condition_id = %leg.condition_id,
+            side = %leg.side,
+            "No opposite-side bid available — cannot unwind"
+        );
+        return Ok(());
+    };
+
+    let recovered = bid.price * leg.size;
+    let original_cost = leg.avg_cost * leg.size;
+    let projected_loss = original_cost - recovered;
+    if projected_loss > unwind_max_loss {
+        warn!(
+            condition_id = %leg.condition_id,
+            side = %leg.side,
+            size = %leg.size,
+            avg_cost = %leg.avg_cost,
+            sell_price = %bid.price,
+            projected_loss = %projected_loss,
+            max_loss = %unwind_max_loss,
+            "Stale leg loss exceeds unwind_max_loss_usdc — leaving for manual close"
+        );
+        return Ok(());
+    }
+
+    info!(
+        condition_id = %leg.condition_id,
+        side = %leg.side,
+        size = %leg.size,
+        sell_price = %bid.price,
+        projected_loss = %projected_loss,
+        "Unwinding stale leg via SELL"
+    );
+
+    let sell_leg = arb_types::LegOrder {
+        condition_id: leg.condition_id.clone(),
+        token_id: leg.token_id.clone(),
+        side: leg.side,
+        size: leg.size,
+        target_price: bid.price,
+        use_fok: true,
+        neg_risk: market.neg_risk,
+        fee_rate_bps: market.fee_rate_bps,
+        min_tick_size: market.min_tick_size,
+        direction: arb_types::TradeDirection::Sell,
+    };
+
+    let result = executor.execute_leg(sell_leg).await;
+    if let arb_types::LegExecutionResult::Filled { fill_size, .. } = &result {
+        let realized_recovered = bid.price * *fill_size;
+        let realized_cost = leg.avg_cost * *fill_size;
+        risk_manager
+            .record_unwind(&leg.condition_id, realized_cost, realized_recovered)
+            .await;
+        inventory.remove_open_leg(&leg.condition_id, leg.id).await;
+    }
+    risk_manager.record_leg_execution(&result).await;
+    Ok(())
 }
 
 fn init_tracing(config: &arb_config::LoggingConfig) {

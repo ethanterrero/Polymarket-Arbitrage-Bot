@@ -41,6 +41,60 @@ Phase 1 added the resting-order tracking but didn't change *what price* `analyze
 - Asymmetric mode now produces real maker quotes that will actually rest on the CLOB. Combined with Phase 1, the system can post → poll → fill → pair.
 - Next: Phase 3 — repost stale quotes when the market moves, enforce `max_unpaired_legs_per_market` against resting + filled-unpaired, send IOC closer when a leg fills.
 
+## 2026-05-17 (Phase 4 — SELL support + active stale-leg unwinder)
+
+### What we did
+Two pieces in one PR:
+1. **Added SELL capability to the executor**, including correct EIP-712 / wire-format handling. The existing path only supported BUY (hardcoded `OrderSide::Buy` in the signed-order builder). Without this, the asymmetric strategy could open positions but had no way to close them at our initiative.
+2. **Converted `find_stale_legs` from a warning log into an active unwinder.** When a leg passes `max_unpaired_hold_secs`, the bot now fetches the current opposite-side bid, computes what we'd realize if we sold, and either sends the IOC SELL or logs an alert (if the projected loss exceeds the configured cap).
+
+### Why this was needed
+Phase 0's thesis identifies stale-leg loss as the #2 failure mode after resolution-imminent fills. Without an active unwinder, a leg that doesn't find its pair just sits accumulating exposure until manual intervention. With this PR, the bot defends itself; the cap (`unwind_max_loss_usdc`, default 5.0) ensures it can't auto-realize catastrophic losses — those still escalate to the operator.
+
+### Key changes
+
+**`arb-types`**
+- New `TradeDirection` enum (`Buy` / `Sell`) with `Display` impl that maps to the CLOB's wire strings (`BUY` / `SELL`).
+- `LegOrder.direction: TradeDirection` (defaults to `Buy` so existing call sites need no behavior change beyond an explicit field).
+- New `best_yes_bid` / `best_no_bid` helpers on `BinaryOrderBook` (needed by the unwinder; the existing `best_*_ask` helpers don't cover this).
+
+**`arb-executor`**
+- `place_order` and `build_signed_order_http_request` take a `TradeDirection` and dispatch to `buy_order_amounts` (existing) or new `sell_order_amounts`. SELL swaps `maker_amount` / `taker_amount` semantics — for SELL we offer tokens and ask for USDC, the inverse of BUY.
+- `OrderSide` enum value in the EIP-712 struct follows the direction.
+- `ClobSignedOrder.side` body string is now `direction.to_string()` — used to be hardcoded `"BUY"`.
+- `execute_leg` honors `order.direction`. Simultaneous and sweep paths explicitly pass `Buy` (unchanged behavior).
+
+**`arb-inventory`**
+- New `remove_open_leg(condition_id, leg_id) -> Option<OpenLeg>`. Removes the leg by id; cleans up the empty `Vec` if no legs remain for that market. Used by the unwinder after a successful SELL fill.
+
+**`arb-risk`**
+- New `record_unwind(condition_id, original_cost, recovered)`. Decrements `unpaired_exposure`, `total_exposure`, and `per_market_unpaired` by `original_cost`; logs realized P&L. Saturates at 0 (no negative exposure).
+
+**`arb-config`**
+- New `strategy.unwind_max_loss_usdc` (default 5.0).
+
+**`arb-bot/src/main.rs`**
+- Stale-leg task replaced. Instead of `warn!`-ing each stale leg, the task now looks the market up, calls a new `attempt_unwind(leg, market, monitor, executor, inventory, risk, max_loss)` helper. The helper fetches `monitor.fetch_binary_book` for current quotes, picks the same-side best bid (we sell what we hold), computes loss, and either sends `LegOrder { direction: Sell, use_fok: true, ... }` or logs an alert.
+
+**`config/default.toml`** — documents the new `strategy.unwind_max_loss_usdc` key.
+
+### Tests
+- **executor (4 new):** SELL `maker_amount` / `taker_amount` swap with reference values; SELL size-truncation; SELL rejects unsupported tick; `execute_leg` with `direction = Sell` sends `"side":"SELL"` in the body (wiremock match).
+- **inventory (3 new):** `remove_open_leg` removes a matching leg and cleans up the empty Vec; returns None on unknown market; returns None on unknown leg id.
+- **risk (2 new):** `record_unwind` decrements all three exposure counters to 0; saturates at 0 instead of going negative.
+
+`cargo test --workspace` — 62 pass (was 53). Build clean.
+
+### What's intentionally deferred
+- **Resting-order cancel before unwind.** If the leg has any related resting orders (from Phase 1), they should be cancelled before the IOC SELL. Phase 1's not merged yet on `main`; once it is, the unwinder should call `executor.cancel_order` for each related resting order first. Follow-up.
+- **Adaptive sell prices.** The unwinder posts at exactly the best bid. If the bid would walk away during latency, we'd partial-fill or miss. Acceptable for v0 because the recommended size is small.
+- **Stuck-leg manual-intervention queue.** Today, when the loss exceeds `unwind_max_loss_usdc`, we log and leave the leg alone. A future PR could persist these to a queue + alert channel.
+
+### State after today
+- Branch: `feat/asymmetric-phase-4-sell-and-unwind`.
+- The bot can now both open *and close* unpaired inventory at its own initiative.
+- Combined with #11 (resting-order tracking), #12 (maker pricing), #13 (scanner filters), #14 (leg-count cap), the maker-mode loop is feature-complete at v0 quality. Phase 3's remaining pieces (repost loop, pair-on-fill closer) are still outstanding and depend on #11.
+
 ---
 
 ## 2026-04-14

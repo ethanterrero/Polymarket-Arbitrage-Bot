@@ -409,6 +409,7 @@ impl ArbitrageDetector {
                 neg_risk: market.neg_risk,
                 fee_rate_bps: market.fee_rate_bps,
                 min_tick_size: tick,
+                direction: arb_types::TradeDirection::Buy,
             });
         }
 
@@ -574,6 +575,7 @@ mod tests {
             max_unpaired_hold_secs: 3600,
             max_unpaired_exposure_usdc: dec!(200),
             max_unpaired_legs_per_market: 3,
+            unwind_max_loss_usdc: dec!(5),
         }
     }
 

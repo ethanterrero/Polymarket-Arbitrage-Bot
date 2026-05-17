@@ -314,7 +314,31 @@ pub struct PairedPosition {
     pub paired_at: DateTime<Utc>,
 }
 
-/// Instruction to buy a single side.
+/// Direction of a single-leg order. Buy means we pay USDC and receive
+/// outcome tokens; Sell is the inverse and is used by Phase 4's stale-leg
+/// unwinder to close unpaired inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TradeDirection {
+    Buy,
+    Sell,
+}
+
+impl Default for TradeDirection {
+    fn default() -> Self {
+        Self::Buy
+    }
+}
+
+impl std::fmt::Display for TradeDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Buy => write!(f, "BUY"),
+            Self::Sell => write!(f, "SELL"),
+        }
+    }
+}
+
+/// Instruction to buy or sell a single side.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegOrder {
     pub condition_id: String,
@@ -329,6 +353,11 @@ pub struct LegOrder {
     pub fee_rate_bps: u32,
     /// Minimum order price increment for this market (used for quantization).
     pub min_tick_size: Decimal,
+    /// Buy or Sell. Defaults to Buy for backward compatibility with the
+    /// asymmetric strategy's open-leg path; Phase 4's unwinder sets this to
+    /// Sell to close unpaired inventory.
+    #[serde(default)]
+    pub direction: TradeDirection,
 }
 
 /// Result of executing a single-leg buy.
