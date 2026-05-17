@@ -2,38 +2,21 @@
 
 ---
 
-## 2026-05-17 (Phase 1 — Resting-order tracking)
+## 2026-05-17 (Phase 0 — Asymmetric maker-mode thesis)
 
 ### What we did
-Made the asymmetric/maker path actually asynchronous. Before this PR, `execute_leg` collapsed every CLOB response to `Filled` or `NoFill` — a confusing mismatch for GTC orders, which the CLOB accepts onto the book *before* they fill. We now distinguish "matched immediately" from "resting on the book", track resting orders in a new `RestingOrderBook`, and run a background poller that transitions matched orders into the existing pairing pipeline.
+Added `docs/ASYMMETRIC_MAKER_THESIS.md` ahead of writing any maker-mode code. It exists so the configuration knobs and risk-control choices in Phases 1–5 have a written-down justification we can argue with later.
 
-### Why this was needed
-Phases 2–5 of the maker-mode rollout all depend on the bot knowing which orders are *resting* vs. *filled*. Without that, you can't reprice stale quotes, can't enforce per-market unpaired-legs limits accurately, and can't trigger pair-on-fill closing trades. Pure plumbing PR.
+### Why this came first
+The simultaneous arb path requires beating other arbers to a crossed orderbook. We don't have a latency edge. Asymmetric (passive maker) mode flips the dependency — we post inside the spread and get paid for waiting, in exchange for adverse selection and inventory risk. None of that requires being fast. But the strategy only makes sense if the captured spread on closed pairs exceeds the realized loss on unwinds, and that ratio depends on which markets we post in. The thesis spells out why mid-tier liquidity, calm-phase, far-from-resolution markets are the only ones worth posting in for v0.
 
-### Key changes
-- **`arb-types`** — new `RestingOrder` struct, `OrderState` enum (Live/Matched/Cancelled/Unknown), `OrderStatus` poll result. `LegExecutionResult::Filled` gained an `order_id: Option<String>`; new `LegExecutionResult::Resting { order, order_id, posted_at }` variant.
-- **`arb-inventory`** — new `resting` module with a `RestingOrderBook` (HashMap keyed on CLOB order id, async RwLock). Kept separate from `InventoryManager` so the leg-fill/pair logic doesn't get tangled with order-book state.
-- **`arb-executor`** — `execute_leg` now returns `Resting` for GTC success (and errors loudly if the CLOB ever returns success without an `orderID`). New `cancel_order` (DELETE /order/{id}, 404 treated as success for idempotency) and `get_order_status` (GET /order/{id}) methods reusing the existing HMAC auth machinery. New `parse_order_status` mirrors the CLOB's free-form status strings into the `OrderState` enum so callers don't string-compare.
-- **`arb-bot/main.rs`** — `try_asymmetric` now hands `Resting` results to the new `RestingOrderBook`. New `poll_resting_orders` task iterates the book on a configurable interval (`monitor.resting_order_poll_interval_secs`, default 10s), calls `get_order_status` on each, and on Matched transitions calls `record_leg_fill_and_pair` (extracted helper) — same code path as immediate fills. Cancelled removes from the book; Live/Unknown leaves it alone.
-- **`arb-risk`** — `record_leg_execution` gained a `Resting` arm (debug-only; resting orders don't yet count against exposure — that's Phase 3's job).
-- **`arb-config` / `config/default.toml`** — new `monitor.resting_order_poll_interval_secs` key.
-
-### What's intentionally deferred
-- **Partial fills.** If the CLOB reports `status=LIVE, size_matched > 0`, v0 leaves the order in place and records nothing — fills are only credited on terminal states (Matched / Cancelled). Simplifies bookkeeping; Phase 3 can revisit if quote-noise patterns leave a lot of partials on the table.
-- **Enforcing `max_unpaired_legs_per_market` against resting orders.** Declared but unused today; Phase 3 wires it into risk evaluation.
-- **Cancel + repost loop.** Phase 3.
-- **Pair-on-fill closing trade.** Phase 3.
-
-### Tests
-- `arb-inventory`: 4 new tests for `RestingOrderBook` add/get/remove/count.
-- `arb-executor`: 9 new tests — wiremock-based: cancel returns 2xx, cancel 404 maps to Ok, cancel 5xx surfaces Api error, get_status parses LIVE/MATCHED/unknown payloads, GTC success returns Resting with order id, FOK success returns Filled with order id, GTC missing order id returns Error.
-
-`cargo test --workspace` — 66 pass, 0 fail (was 53). Zero new build warnings.
+### Recommended config defaults (for first live session)
+Documented in the thesis and pasted here for grep-ability: `asymmetric_target_total_cost = 0.97`, `min_net_spread = 0.02`, `max_unpaired_hold_secs = 1800`, `max_unpaired_legs_per_market = 1`, `asymmetric_repost_interval_secs = 60` (new in Phase 3), `unwind_max_loss_usdc = 5.0` (new in Phase 4), `max_order_size_usdc = 5.0`, `max_total_exposure_usdc = 25.0`, `scanner.min_24h_volume_usdc = 1000.0`, `scanner.min_secs_to_resolution = 259200`.
 
 ### State after today
-- Branch: `feat/asymmetric-phase-1-resting-orders`.
-- Asymmetric mode now produces real resting state. Pairing-on-poll works end-to-end against mocked CLOBs. Real-CLOB shakedown belongs in Phase 5 or after we have at least one of Phase 2 (maker pricing) shipped.
-- Next: Phase 2 — `analyze_asymmetric` posts at `best_bid + tick` (inside-the-spread) instead of `best_ask` (the current taker-disguised-as-async behavior).
+- No code changed. `cargo test --workspace` still green at 53 tests.
+- Branch: `feat/asymmetric-phase-0-thesis`.
+- Next: Phase 1 (resting-order tracking) — the load-bearing PR everything else depends on.
 
 ---
 
