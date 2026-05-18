@@ -334,10 +334,19 @@ pub struct LegOrder {
 /// Result of executing a single-leg buy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LegExecutionResult {
+    /// Order was matched immediately (FOK fill, or GTC that crossed the book).
     Filled {
         order: LegOrder,
+        order_id: Option<String>,
         fill_size: Decimal,
         fill_cost: Decimal,
+    },
+    /// GTC order accepted by the CLOB and now resting on the book. Phase 1+ owns
+    /// polling this id for fill status and pairing it through the inventory.
+    Resting {
+        order: LegOrder,
+        order_id: String,
+        posted_at: DateTime<Utc>,
     },
     NoFill {
         order: LegOrder,
@@ -357,6 +366,10 @@ impl LegExecutionResult {
         matches!(self, Self::Filled { .. })
     }
 
+    pub fn is_resting(&self) -> bool {
+        matches!(self, Self::Resting { .. })
+    }
+
     pub fn fill_size(&self) -> Decimal {
         match self {
             Self::Filled { fill_size, .. } => *fill_size,
@@ -370,6 +383,48 @@ impl LegExecutionResult {
             _ => Decimal::ZERO,
         }
     }
+}
+
+/// A GTC order posted to the CLOB that has not yet fully filled or cancelled.
+/// Tracked in the `RestingOrderBook` so the poller can transition it to a
+/// fill via `InventoryManager::record_leg_fill` when the CLOB reports a match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RestingOrder {
+    pub order_id: String,
+    pub condition_id: String,
+    pub token_id: String,
+    pub side: Side,
+    pub size: Decimal,
+    pub price: Decimal,
+    pub posted_at: DateTime<Utc>,
+}
+
+/// Status of a single order on the CLOB, as returned by `GET /order/{id}`.
+/// We map the CLOB's free-form `status` string into this enum so callers don't
+/// have to string-compare; unknown values become `Unknown` and are logged but
+/// not acted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OrderState {
+    /// Order is on the book, awaiting fills.
+    Live,
+    /// Order has fully matched.
+    Matched,
+    /// Order was cancelled (by us or by the CLOB).
+    Cancelled,
+    /// Status string the CLOB returned that we don't recognize.
+    Unknown,
+}
+
+/// Polled status of a CLOB order. `size_matched` is cumulative across all
+/// fills so far; `avg_fill_price` is what the CLOB reports as the realized
+/// price (None when there are no fills yet).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderStatus {
+    pub order_id: String,
+    pub state: OrderState,
+    pub size_matched: Decimal,
+    pub original_size: Decimal,
+    pub avg_fill_price: Option<Decimal>,
 }
 
 /// Read-only snapshot of inventory state, passed to strategy to avoid circular deps.

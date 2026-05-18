@@ -42,6 +42,9 @@ min_liquidity_usdc = "100.0"
 use_websocket = true
 poll_interval_ms = 2000
 max_concurrent_requests = 20
+# How often the bot polls the CLOB for status updates on resting (GTC) leg
+# orders. Smaller = faster pairing reaction, more API calls.
+resting_order_poll_interval_secs = 10
 
 [logging]
 level = "info"
