@@ -91,6 +91,16 @@ impl BinaryOrderBook {
         self.no_book.asks.first()
     }
 
+    /// Returns the best (highest) bid price for the YES side, if any.
+    pub fn best_yes_bid(&self) -> Option<&PriceLevel> {
+        self.yes_book.bids.first()
+    }
+
+    /// Returns the best (highest) bid price for the NO side, if any.
+    pub fn best_no_bid(&self) -> Option<&PriceLevel> {
+        self.no_book.bids.first()
+    }
+
     /// Age of this orderbook snapshot in milliseconds.
     pub fn age_ms(&self) -> i64 {
         (Utc::now() - self.timestamp).num_milliseconds()
