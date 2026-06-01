@@ -59,15 +59,15 @@ export function StatsCards({ activity, snapshots }: StatsCardsProps) {
         hint="USDC · latest snapshot"
         icon={<DollarSign className="h-4 w-4" />}
         accent="text-(--color-arb-primary)"
-        spark={{ values: stats.balanceSeries, color: 'var(--color-arb-buy)' }}
+        spark={{ values: stats.balanceSeries, color: 'var(--color-arb-primary)' }}
       />
       <KpiTile
         label="Exposure"
         value={formatUsd(stats.exposure)}
         hint={`${stats.openPositions} open position${stats.openPositions === 1 ? '' : 's'}`}
         icon={<Layers className="h-4 w-4" />}
-        accent="text-(--color-arb-info)"
-        spark={{ values: stats.exposureSeries, color: 'var(--color-arb-info)' }}
+        accent="text-(--color-arb-buy)"
+        spark={{ values: stats.exposureSeries, color: 'var(--color-arb-buy)' }}
       />
       <KpiTile
         label="Opps · 1h"

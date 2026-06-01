@@ -68,12 +68,12 @@ export function BalanceChart({ snapshots }: BalanceChartProps) {
             <AreaChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
               <defs>
                 <linearGradient id="balance-grad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="var(--color-arb-buy)" stopOpacity={0.4} />
-                  <stop offset="100%" stopColor="var(--color-arb-buy)" stopOpacity={0} />
+                  <stop offset="0%" stopColor="var(--color-arb-primary)" stopOpacity={0.35} />
+                  <stop offset="100%" stopColor="var(--color-arb-primary)" stopOpacity={0} />
                 </linearGradient>
                 <linearGradient id="exposure-grad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="var(--color-arb-info)" stopOpacity={0.35} />
-                  <stop offset="100%" stopColor="var(--color-arb-info)" stopOpacity={0} />
+                  <stop offset="0%" stopColor="var(--color-arb-buy)" stopOpacity={0.25} />
+                  <stop offset="100%" stopColor="var(--color-arb-buy)" stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid stroke="var(--color-arb-line)" strokeDasharray="3 6" vertical={false} />
@@ -112,7 +112,7 @@ export function BalanceChart({ snapshots }: BalanceChartProps) {
               <Area
                 type="monotone"
                 dataKey="balance"
-                stroke="var(--color-arb-buy)"
+                stroke="var(--color-arb-primary)"
                 strokeWidth={2}
                 fill="url(#balance-grad)"
                 isAnimationActive={false}
@@ -121,7 +121,7 @@ export function BalanceChart({ snapshots }: BalanceChartProps) {
               <Area
                 type="monotone"
                 dataKey="exposure"
-                stroke="var(--color-arb-info)"
+                stroke="var(--color-arb-buy)"
                 strokeWidth={2}
                 fill="url(#exposure-grad)"
                 isAnimationActive={false}

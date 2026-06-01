@@ -1,35 +1,35 @@
 @import "tailwindcss";
 
-/* Restrained palette — desaturated layered greens on a near-black canvas,
-   leaning Linear / Stripe / Vercel rather than crypto-neon. Type does the
-   work; glows and gradient edges are intentionally absent. */
+/* Coinbase-inspired palette — cool near-black canvas, saturated cobalt as the
+   single chrome accent, classic green-up / red-down for finance signals.
+   Type still does the bulk of the work; borders and effects stay quiet. */
 @theme {
-  --color-arb-bg: oklch(0.16 0.008 150);            /* near-black, faint green */
-  --color-arb-surface: oklch(0.21 0.010 150);       /* card surface */
-  --color-arb-surface-hi: oklch(0.26 0.012 150);    /* hover surface */
-  --color-arb-line: oklch(0.32 0.012 150);          /* divider */
-  --color-arb-text: oklch(0.96 0.005 150);
-  --color-arb-text-dim: oklch(0.72 0.012 150);
-  --color-arb-text-faint: oklch(0.55 0.015 150);
+  --color-arb-bg: oklch(0.15 0.008 260);            /* near-black, cool slate */
+  --color-arb-surface: oklch(0.20 0.010 260);       /* card surface */
+  --color-arb-surface-hi: oklch(0.25 0.012 260);    /* hover surface */
+  --color-arb-line: oklch(0.30 0.010 260);          /* divider */
+  --color-arb-text: oklch(0.98 0.003 260);
+  --color-arb-text-dim: oklch(0.74 0.010 260);
+  --color-arb-text-faint: oklch(0.55 0.012 260);
 
-  --color-arb-primary: oklch(0.78 0.13 150);        /* sage / Stripe-green */
-  --color-arb-secondary: oklch(0.72 0.10 160);      /* muted mint */
-  --color-arb-accent: oklch(0.65 0.11 165);         /* deeper emerald */
-  --color-arb-accent-soft: oklch(0.55 0.08 165);
+  /* Coinbase blue (~#0052ff). Used for: brand mark, active nav rail,
+     opportunity events, status "online" pill, primary CTAs. */
+  --color-arb-primary: oklch(0.62 0.24 263);
+  --color-arb-primary-hi: oklch(0.70 0.22 263);     /* hover */
+  --color-arb-secondary: oklch(0.72 0.16 250);      /* softer blue accent */
+  --color-arb-accent: oklch(0.62 0.24 263);
 
-  /* Event-kind hues — distinct but desaturated. The green chrome no longer
-     fights with the badges. */
-  --color-arb-buy: oklch(0.78 0.13 150);            /* fill — sage */
-  --color-arb-info: oklch(0.74 0.10 195);           /* opportunity — cool teal */
-  --color-arb-warn: oklch(0.80 0.12 90);            /* dry-run — soft amber */
-  --color-arb-err: oklch(0.70 0.14 35);             /* error — muted coral */
-  --color-arb-muted: oklch(0.55 0.02 150);          /* no-fill — neutral grey */
+  /* Finance signal colors. */
+  --color-arb-buy: oklch(0.78 0.20 145);            /* gain / fill — bright green */
+  --color-arb-info: oklch(0.62 0.24 263);           /* opportunity — Coinbase blue */
+  --color-arb-warn: oklch(0.80 0.15 80);            /* dry-run — amber */
+  --color-arb-err: oklch(0.65 0.22 25);             /* loss / error — bright red */
+  --color-arb-muted: oklch(0.55 0.02 260);          /* no-fill — neutral grey */
 
-  /* Direction colors for YES/NO prices. */
-  --color-arb-yes: oklch(0.80 0.13 150);
-  --color-arb-no: oklch(0.74 0.11 55);
+  /* Direction colors for YES/NO prices — Coinbase green up, red down. */
+  --color-arb-yes: oklch(0.78 0.20 145);
+  --color-arb-no: oklch(0.65 0.22 25);
 
-  --font-display: "Inter", system-ui, -apple-system, sans-serif;
   --font-sans: "Inter", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
 }
@@ -59,11 +59,11 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: oklch(0.32 0.01 150);
+  background: oklch(0.30 0.01 260);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.42 0.01 150);
+  background: oklch(0.40 0.01 260);
 }
 
 /* Focus ring for keyboard nav. */
@@ -97,7 +97,6 @@ body {
   animation: pulse-dot 2s ease-in-out infinite;
 }
 
-/* Drawer slide-in from the right. */
 @keyframes drawer-in {
   from { transform: translateX(100%); opacity: 0; }
   to { transform: translateX(0); opacity: 1; }
