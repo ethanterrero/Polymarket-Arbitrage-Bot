@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+/* Tailwind v4: customize via CSS-first @theme blocks. We expose a few semantic
+   tokens for the activity badge colors so they stay consistent across the
+   feed, charts, and stats cards. */
+@theme {
+  --color-arb-buy: oklch(0.7 0.18 145);    /* fill green */
+  --color-arb-info: oklch(0.72 0.15 220);  /* opportunity blue */
+  --color-arb-warn: oklch(0.78 0.18 75);   /* dry-run amber */
+  --color-arb-err: oklch(0.7 0.22 25);     /* error red */
+  --color-arb-muted: oklch(0.55 0.02 250); /* no-fill grey */
+
+  --font-display: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-display);
+}
+
+/* Subtle scrollbar in the dark theme so the activity feed doesn't have an
+   eye-watering white track. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(0.3 0.01 250);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.4 0.01 250);
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in 240ms ease-out;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.animate-pulse-dot {
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
