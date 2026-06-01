@@ -57,13 +57,13 @@ export function KindBreakdown({ rows }: KindBreakdownProps) {
           <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 8 }}>
             <XAxis
               dataKey="name"
-              stroke="oklch(0.5 0.01 250)"
+              stroke="var(--color-arb-text-faint)"
               tick={{ fontSize: 11 }}
               tickLine={false}
               axisLine={false}
             />
             <YAxis
-              stroke="oklch(0.5 0.01 250)"
+              stroke="var(--color-arb-text-faint)"
               tick={{ fontSize: 11 }}
               tickLine={false}
               axisLine={false}
@@ -72,14 +72,14 @@ export function KindBreakdown({ rows }: KindBreakdownProps) {
             />
             <Tooltip
               contentStyle={{
-                backgroundColor: 'oklch(0.18 0.005 250)',
-                border: '1px solid oklch(0.3 0.01 250)',
+                backgroundColor: 'var(--color-arb-surface)',
+                border: '1px solid var(--color-arb-line)',
                 borderRadius: 8,
                 fontSize: 12,
               }}
-              labelStyle={{ color: 'oklch(0.7 0.01 250)' }}
-              itemStyle={{ color: 'oklch(0.95 0 0)' }}
-              cursor={{ fill: 'oklch(0.25 0.005 250 / 0.4)' }}
+              labelStyle={{ color: 'var(--color-arb-text-dim)' }}
+              itemStyle={{ color: 'var(--color-arb-text)' }}
+              cursor={{ fill: 'var(--color-arb-surface-hi)' }}
               formatter={(value) => {
                 const n = typeof value === 'number' ? value : Number(value)
                 return [formatInt(n), 'events']

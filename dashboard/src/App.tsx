@@ -1,18 +1,45 @@
-import { useMemo } from 'react'
-import { Header } from '@/components/Header'
-import { StatsCards } from '@/components/StatsCards'
-import { ActivityFeed } from '@/components/ActivityFeed'
-import { BalanceChart } from '@/components/BalanceChart'
-import { KindBreakdown } from '@/components/KindBreakdown'
+import { useMemo, useState } from 'react'
+import { Sidebar, type Route } from '@/components/layout/Sidebar'
+import { TopBar } from '@/components/layout/TopBar'
+import { Ticker } from '@/components/layout/Ticker'
+import { OverviewPage } from '@/components/pages/OverviewPage'
+import { MarketsPage } from '@/components/pages/MarketsPage'
+import { ActivityPage } from '@/components/pages/ActivityPage'
+import { DiagnosticsPage } from '@/components/pages/DiagnosticsPage'
+import { DetailDrawer } from '@/components/feed/DetailDrawer'
 import { useActivity } from '@/hooks/useActivity'
 import { useSnapshots } from '@/hooks/useSnapshots'
+import { groupByMarket } from '@/lib/aggregate'
+import type { ActivityRow } from '@/lib/types'
+
+const PAGE_META: Record<Route, { title: string; hint: string }> = {
+  overview: {
+    title: 'overview',
+    hint: 'live KPIs · balance curve · recent activity',
+  },
+  markets: {
+    title: 'markets',
+    hint: 'one card per observed condition_id',
+  },
+  activity: {
+    title: 'activity',
+    hint: 'full event feed · filter by kind + search',
+  },
+  diagnostics: {
+    title: 'diagnostics',
+    hint: 'connection state · supabase target · stream counts',
+  },
+}
 
 function App() {
-  const { rows: activity, status } = useActivity(200)
+  const { rows: activity, status } = useActivity(300)
   const snapshots = useSnapshots(200)
 
-  // Derive a couple of header flags from the activity stream so we don't have
-  // to thread state through extra hooks.
+  const [route, setRoute] = useState<Route>('overview')
+  const [selectedRow, setSelectedRow] = useState<ActivityRow | null>(null)
+  // Used to cross-link: click a market card → land on Activity with its id pre-filtered.
+  const [activityPrefilter, setActivityPrefilter] = useState<string | null>(null)
+
   const { hasLiveTrades, strategyMode } = useMemo(() => {
     let live = false
     let mode: string | null = null
@@ -24,31 +51,72 @@ function App() {
     return { hasLiveTrades: live, strategyMode: mode }
   }, [activity])
 
+  const marketCount = useMemo(() => groupByMarket(activity).length, [activity])
+
+  function gotoMarket(conditionId: string) {
+    setActivityPrefilter(conditionId)
+    setRoute('activity')
+  }
+
+  // The Activity page owns its own filter state; we re-mount it via key when we
+  // arrive with a prefilter, so the new initial-query takes effect cleanly.
+  const activityKey = activityPrefilter ?? 'all'
+
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <Header
-        status={status}
-        hasLiveTrades={hasLiveTrades}
-        strategyMode={strategyMode}
+    <div className="flex min-h-screen bg-(--color-arb-bg) text-(--color-arb-text)">
+      <Sidebar
+        route={route}
+        onRouteChange={(r) => {
+          setRoute(r)
+          if (r !== 'activity') setActivityPrefilter(null)
+        }}
+        activityCount={activity.length}
+        marketCount={marketCount}
       />
-      <main className="mx-auto flex max-w-7xl flex-col gap-6 px-6 py-6">
-        <StatsCards activity={activity} snapshots={snapshots} />
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          <div className="lg:col-span-2">
-            <BalanceChart snapshots={snapshots} />
-          </div>
-          <div>
-            <KindBreakdown rows={activity} />
-          </div>
-        </div>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <TopBar
+          status={status}
+          hasLiveTrades={hasLiveTrades}
+          strategyMode={strategyMode}
+          title={PAGE_META[route].title}
+          hint={PAGE_META[route].hint}
+        />
+        <Ticker rows={activity} />
 
-        <ActivityFeed rows={activity} />
+        <main className="flex-1">
+          {route === 'overview' && (
+            <OverviewPage
+              activity={activity}
+              snapshots={snapshots}
+              onSelectRow={setSelectedRow}
+            />
+          )}
+          {route === 'markets' && (
+            <MarketsPage activity={activity} onSelectMarket={gotoMarket} />
+          )}
+          {route === 'activity' && (
+            <ActivityPage
+              key={activityKey}
+              activity={
+                activityPrefilter
+                  ? activity.filter((r) => r.condition_id === activityPrefilter)
+                  : activity
+              }
+              onSelectRow={setSelectedRow}
+            />
+          )}
+          {route === 'diagnostics' && (
+            <DiagnosticsPage status={status} activity={activity} snapshots={snapshots} />
+          )}
+        </main>
 
-        <footer className="pb-4 pt-2 text-center font-mono text-[11px] uppercase tracking-wider text-zinc-600">
+        <footer className="border-t border-(--color-arb-line) px-6 py-3 text-center font-mono text-[10px] uppercase tracking-[0.22em] text-(--color-arb-text-faint)">
           polymarket-arb · supabase realtime · {snapshots.length} snapshots · {activity.length} events
         </footer>
-      </main>
+      </div>
+
+      <DetailDrawer row={selectedRow} onClose={() => setSelectedRow(null)} />
     </div>
   )
 }

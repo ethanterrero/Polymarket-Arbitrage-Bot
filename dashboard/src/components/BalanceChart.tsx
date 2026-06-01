@@ -76,17 +76,17 @@ export function BalanceChart({ snapshots }: BalanceChartProps) {
                   <stop offset="100%" stopColor="var(--color-arb-info)" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid stroke="oklch(0.25 0.01 250)" strokeDasharray="3 6" vertical={false} />
+              <CartesianGrid stroke="var(--color-arb-line)" strokeDasharray="3 6" vertical={false} />
               <XAxis
                 dataKey="label"
-                stroke="oklch(0.5 0.01 250)"
+                stroke="var(--color-arb-text-faint)"
                 tick={{ fontSize: 11 }}
                 tickLine={false}
                 axisLine={false}
                 minTickGap={48}
               />
               <YAxis
-                stroke="oklch(0.5 0.01 250)"
+                stroke="var(--color-arb-text-faint)"
                 tick={{ fontSize: 11 }}
                 tickLine={false}
                 axisLine={false}
@@ -95,13 +95,13 @@ export function BalanceChart({ snapshots }: BalanceChartProps) {
               />
               <Tooltip
                 contentStyle={{
-                  backgroundColor: 'oklch(0.18 0.005 250)',
-                  border: '1px solid oklch(0.3 0.01 250)',
+                  backgroundColor: 'var(--color-arb-surface)',
+                  border: '1px solid var(--color-arb-line)',
                   borderRadius: 8,
                   fontSize: 12,
                 }}
-                labelStyle={{ color: 'oklch(0.7 0.01 250)' }}
-                itemStyle={{ color: 'oklch(0.95 0 0)' }}
+                labelStyle={{ color: 'var(--color-arb-text-dim)' }}
+                itemStyle={{ color: 'var(--color-arb-text)' }}
                 formatter={(value, name) => {
                   const n = typeof value === 'number' ? value : Number(value)
                   const series = typeof name === 'string' ? name : String(name)

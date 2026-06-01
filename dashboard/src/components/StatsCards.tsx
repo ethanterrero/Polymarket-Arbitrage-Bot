@@ -1,38 +1,18 @@
 import { useMemo } from 'react'
 import { Activity, DollarSign, Layers, TrendingUp, Zap } from 'lucide-react'
-import { Card } from './Card'
+import { KpiTile } from './tiles/KpiTile'
 import { cn, formatInt, formatUsd } from '@/lib/utils'
-import type { ActivityRow, SnapshotRow } from '@/lib/types'
 import { toNumber } from '@/lib/types'
+import type { ActivityRow, SnapshotRow } from '@/lib/types'
+import {
+  fillCumulative,
+  opportunitiesPerMinute,
+  snapshotSparkline,
+} from '@/lib/aggregate'
 
 interface StatsCardsProps {
   activity: ActivityRow[]
   snapshots: SnapshotRow[]
-}
-
-interface TileProps {
-  label: string
-  value: string
-  hint?: string
-  icon: React.ReactNode
-  accent?: string
-}
-
-function Tile({ label, value, hint, icon, accent }: TileProps) {
-  return (
-    <Card className="flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-medium uppercase tracking-wider text-zinc-400">
-          {label}
-        </span>
-        <span className={cn('opacity-70', accent)}>{icon}</span>
-      </div>
-      <div className="font-mono text-2xl font-semibold text-zinc-100 tabular-nums">
-        {value}
-      </div>
-      {hint && <div className="text-xs text-zinc-500">{hint}</div>}
-    </Card>
-  )
 }
 
 export function StatsCards({ activity, snapshots }: StatsCardsProps) {
@@ -64,45 +44,58 @@ export function StatsCards({ activity, snapshots }: StatsCardsProps) {
       dryRuns,
       errors,
       totalProfit,
+      balanceSeries: snapshotSparkline(snapshots, 'balance'),
+      exposureSeries: snapshotSparkline(snapshots, 'total_exposure'),
+      oppsSeries: opportunitiesPerMinute(activity, 30),
+      fillsSeries: fillCumulative(activity),
     }
   }, [activity, snapshots])
 
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-      <Tile
+      <KpiTile
         label="Balance"
         value={formatUsd(stats.balance)}
-        hint="USDC, latest snapshot"
+        hint="USDC · latest snapshot"
         icon={<DollarSign className="h-4 w-4" />}
-        accent="text-emerald-400"
+        accent="text-(--color-arb-primary)"
+        glow="amber"
+        spark={{ values: stats.balanceSeries, color: 'var(--color-arb-buy)' }}
       />
-      <Tile
+      <KpiTile
         label="Exposure"
         value={formatUsd(stats.exposure)}
         hint={`${stats.openPositions} open position${stats.openPositions === 1 ? '' : 's'}`}
         icon={<Layers className="h-4 w-4" />}
-        accent="text-sky-400"
+        accent="text-(--color-arb-info)"
+        spark={{ values: stats.exposureSeries, color: 'var(--color-arb-info)' }}
       />
-      <Tile
+      <KpiTile
         label="Opps · 1h"
         value={formatInt(stats.oppsHour)}
-        hint="detected, pre-risk"
+        hint="detected · pre-risk"
         icon={<Zap className="h-4 w-4" />}
-        accent="text-(--color-arb-info)"
+        accent="text-(--color-arb-accent)"
+        glow="accent"
+        spark={{ values: stats.oppsSeries, color: 'var(--color-arb-accent)' }}
       />
-      <Tile
+      <KpiTile
         label="Fills"
         value={formatInt(stats.fills)}
         hint={`${formatInt(stats.dryRuns)} dry-run`}
         icon={<Activity className="h-4 w-4" />}
         accent="text-(--color-arb-buy)"
+        spark={{ values: stats.fillsSeries, color: 'var(--color-arb-buy)' }}
       />
-      <Tile
+      <KpiTile
         label="Expected P&L"
         value={formatUsd(stats.totalProfit)}
-        hint={stats.errors > 0 ? `${stats.errors} error${stats.errors === 1 ? '' : 's'}` : 'sum of filled ops'}
-        icon={<TrendingUp className="h-4 w-4" />}
-        accent={stats.errors > 0 ? 'text-(--color-arb-err)' : 'text-emerald-400'}
+        hint={
+          stats.errors > 0 ? `${stats.errors} error${stats.errors === 1 ? '' : 's'}` : 'sum of filled ops'
+        }
+        icon={<TrendingUp className={cn('h-4 w-4', stats.errors > 0 && 'text-(--color-arb-err)')} />}
+        accent={stats.errors > 0 ? 'text-(--color-arb-err)' : 'text-(--color-arb-primary)'}
+        glow={stats.errors > 0 ? 'none' : 'amber'}
       />
     </div>
   )
