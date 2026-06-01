@@ -209,6 +209,12 @@ impl Recorder {
             LegExecutionResult::NoFill { order, .. } => (order, "no_fill", None),
             LegExecutionResult::Error { order, .. } => (order, "error", None),
             LegExecutionResult::DryRun { order } => (order, "dry_run", None),
+            // A GTC order resting on the book (maker mode, Phase 1+) is not
+            // surfaced on the dashboard yet — that needs a dedicated 'resting'
+            // activity kind plus a DB CHECK-constraint migration. Skip for now
+            // rather than mislabel it as a fill/no-fill.
+            // TODO: add a 'resting' event kind for maker-mode visibility.
+            LegExecutionResult::Resting { .. } => return,
         };
         let (yes_price, no_price) = match order.side {
             Side::Yes => (order.target_price.to_f64(), None),
