@@ -3,6 +3,7 @@ use arb_config::{AppConfig, ExecutionMode};
 use arb_executor::OrderExecutor;
 use arb_inventory::InventoryManager;
 use arb_monitor::PriceMonitor;
+use arb_recorder::Recorder;
 use arb_risk::RiskManager;
 use arb_scanner::MarketScanner;
 use arb_strategy::ArbitrageDetector;
@@ -22,6 +23,7 @@ async fn main() -> Result<()> {
 
     let strategy_mode = config.strategy.mode;
     let max_sweep_levels = config.strategy.max_sweep_levels;
+    let is_live = matches!(config.execution.mode, ExecutionMode::Live);
 
     info!("Polymarket Arbitrage Bot starting");
     info!(
@@ -40,6 +42,14 @@ async fn main() -> Result<()> {
     let detector = ArbitrageDetector::new(&config.strategy);
     let risk_manager = Arc::new(RiskManager::new(&config.risk));
     let inventory = Arc::new(InventoryManager::new(config.strategy.max_unpaired_hold_secs));
+
+    // Telemetry recorder for the dashboard. No-op unless telemetry.enabled is
+    // set and SUPABASE_URL / SUPABASE_SERVICE_KEY are present in the env.
+    let recorder = Arc::new(Recorder::new(
+        config.telemetry.enabled,
+        is_live,
+        strategy_mode.to_string(),
+    ));
 
     // Determine execution mode.
     let executor: Arc<OrderExecutor> = match config.execution.mode {
@@ -143,6 +153,7 @@ async fn main() -> Result<()> {
     // Spawn periodic balance check.
     let risk_for_balance = risk_manager.clone();
     let monitor_for_balance = monitor.clone();
+    let recorder_for_balance = recorder.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
@@ -153,11 +164,13 @@ async fn main() -> Result<()> {
             }
             let balance = risk_for_balance.balance().await;
             let exposure = risk_for_balance.total_exposure().await;
+            let open_positions = risk_for_balance.open_positions().await;
             info!(
                 balance = %balance,
                 exposure = %exposure,
                 "Balance check"
             );
+            recorder_for_balance.record_snapshot(balance, exposure, open_positions);
         }
     });
 
@@ -225,6 +238,7 @@ async fn main() -> Result<()> {
                     &market,
                     &risk_manager,
                     &executor,
+                    &recorder,
                     max_sweep_levels,
                     &mut opportunities_detected,
                 )
@@ -240,6 +254,7 @@ async fn main() -> Result<()> {
                     &market,
                     &risk_manager,
                     &executor,
+                    &recorder,
                     &inventory,
                     &mut opportunities_detected,
                 )
@@ -252,6 +267,7 @@ async fn main() -> Result<()> {
                     &market,
                     &risk_manager,
                     &executor,
+                    &recorder,
                     max_sweep_levels,
                     &mut opportunities_detected,
                 )
@@ -263,6 +279,7 @@ async fn main() -> Result<()> {
                         &market,
                         &risk_manager,
                         &executor,
+                        &recorder,
                         &inventory,
                         &mut opportunities_detected,
                     )
@@ -284,6 +301,7 @@ async fn try_simultaneous(
     market: &BinaryMarket,
     risk_manager: &Arc<RiskManager>,
     executor: &Arc<OrderExecutor>,
+    recorder: &Arc<Recorder>,
     max_sweep_levels: usize,
     opportunities_detected: &mut u64,
 ) -> bool {
@@ -296,12 +314,14 @@ async fn try_simultaneous(
                 Ok(approved) => {
                     let executor = executor.clone();
                     let risk_manager = risk_manager.clone();
+                    let recorder = recorder.clone();
                     tokio::spawn(async move {
                         let result = executor.execute_sweep(approved).await;
                         if result.is_success() {
                             info!("Sweep trade executed successfully!");
                         }
                         risk_manager.record_execution(&result).await;
+                        recorder.record_execution(&result);
                     });
                     return true;
                 }
@@ -315,17 +335,20 @@ async fn try_simultaneous(
     // Fallback to single-level analysis.
     if let Ok(opportunity) = detector.analyze(book, market) {
         *opportunities_detected += 1;
+        recorder.record_opportunity(&opportunity);
         let order = detector.to_execution_order(opportunity);
         match risk_manager.evaluate(order).await {
             Ok(approved_order) => {
                 let executor = executor.clone();
                 let risk_manager = risk_manager.clone();
+                let recorder = recorder.clone();
                 tokio::spawn(async move {
                     let result = executor.execute(approved_order).await;
                     if result.is_success() {
                         info!("Trade executed successfully!");
                     }
                     risk_manager.record_execution(&result).await;
+                    recorder.record_execution(&result);
                 });
                 return true;
             }
@@ -345,6 +368,7 @@ async fn try_asymmetric(
     market: &BinaryMarket,
     risk_manager: &Arc<RiskManager>,
     executor: &Arc<OrderExecutor>,
+    recorder: &Arc<Recorder>,
     inventory: &Arc<InventoryManager>,
     opportunities_detected: &mut u64,
 ) {
@@ -371,6 +395,7 @@ async fn try_asymmetric(
 
         let executor = executor.clone();
         let risk_manager = risk_manager.clone();
+        let recorder = recorder.clone();
         let inventory = inventory.clone();
 
         tokio::spawn(async move {
@@ -421,6 +446,7 @@ async fn try_asymmetric(
             }
 
             risk_manager.record_leg_execution(&result).await;
+            recorder.record_leg_execution(&result);
         });
     }
 }

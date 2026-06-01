@@ -93,6 +93,11 @@ impl RiskManager {
         self.state.read().await.total_exposure
     }
 
+    /// Get the current number of open positions.
+    pub async fn open_positions(&self) -> usize {
+        self.state.read().await.open_positions
+    }
+
     /// Evaluate an opportunity against risk limits.
     /// Returns an ExecutionOrder with the approved size, or an error.
     pub async fn evaluate(

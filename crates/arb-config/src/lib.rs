@@ -39,6 +39,25 @@ pub struct AppConfig {
     pub scanner: ScannerConfig,
     pub monitor: MonitorConfig,
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+}
+
+/// Telemetry / dashboard recording. Credentials (`SUPABASE_URL`,
+/// `SUPABASE_SERVICE_KEY`) are read from the environment, not this file, so the
+/// service-role key is never committed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelemetryConfig {
+    /// When true, the bot records activity + snapshots to Supabase for the
+    /// dashboard. Defaults to false — telemetry is opt-in.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

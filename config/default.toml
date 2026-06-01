@@ -46,3 +46,9 @@ max_concurrent_requests = 20
 [logging]
 level = "info"
 json_output = false
+
+[telemetry]
+# When true, the bot records activity (opportunities, dry-runs, fills) and
+# periodic state snapshots to Supabase so the dashboard can visualize them.
+# Requires SUPABASE_URL and SUPABASE_SERVICE_KEY in the environment (.env).
+enabled = false

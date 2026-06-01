@@ -9,6 +9,7 @@ members = [
     "crates/arb-executor",
     "crates/arb-risk",
     "crates/arb-inventory",
+    "crates/arb-recorder",
     "crates/arb-bot",
 ]
 
