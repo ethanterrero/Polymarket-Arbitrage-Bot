@@ -10,6 +10,7 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.vite
 *.local
 
 # Vite env (the .env.example is committed; real keys live in .env / .env.local)
