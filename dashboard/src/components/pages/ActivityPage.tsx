@@ -51,7 +51,7 @@ export function ActivityPage({ activity, onSelectRow }: ActivityPageProps) {
 
   return (
     <div className="flex flex-col gap-6 px-6 py-6">
-      <Card className="gradient-edge">
+      <Card className="">
         <CardHeader title="Filter" hint="combine kind chips + market search" />
         <div className="flex flex-col gap-4">
           <div className="relative">

@@ -59,7 +59,6 @@ export function StatsCards({ activity, snapshots }: StatsCardsProps) {
         hint="USDC · latest snapshot"
         icon={<DollarSign className="h-4 w-4" />}
         accent="text-(--color-arb-primary)"
-        glow="amber"
         spark={{ values: stats.balanceSeries, color: 'var(--color-arb-buy)' }}
       />
       <KpiTile
@@ -75,9 +74,8 @@ export function StatsCards({ activity, snapshots }: StatsCardsProps) {
         value={formatInt(stats.oppsHour)}
         hint="detected · pre-risk"
         icon={<Zap className="h-4 w-4" />}
-        accent="text-(--color-arb-accent)"
-        glow="accent"
-        spark={{ values: stats.oppsSeries, color: 'var(--color-arb-accent)' }}
+        accent="text-(--color-arb-info)"
+        spark={{ values: stats.oppsSeries, color: 'var(--color-arb-info)' }}
       />
       <KpiTile
         label="Fills"
@@ -95,7 +93,6 @@ export function StatsCards({ activity, snapshots }: StatsCardsProps) {
         }
         icon={<TrendingUp className={cn('h-4 w-4', stats.errors > 0 && 'text-(--color-arb-err)')} />}
         accent={stats.errors > 0 ? 'text-(--color-arb-err)' : 'text-(--color-arb-primary)'}
-        glow={stats.errors > 0 ? 'none' : 'amber'}
       />
     </div>
   )

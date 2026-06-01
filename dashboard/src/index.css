@@ -1,33 +1,36 @@
 @import "tailwindcss";
 
-/* Tailwind v4: CSS-first theme. Custom palette pulled from the design-system
-   recommendation for a crypto/fintech trading terminal:
-     - amber (#F59E0B) for trust + positive value
-     - purple (#8B5CF6) for tech/web3 accents + interactive states
-     - deep slate (#0B1020) for OLED-friendly background
-   Event-kind colors are kept on a separate `--color-arb-*` scale so the feed,
-   chart, and badges stay in lockstep. */
+/* Restrained palette — desaturated layered greens on a near-black canvas,
+   leaning Linear / Stripe / Vercel rather than crypto-neon. Type does the
+   work; glows and gradient edges are intentionally absent. */
 @theme {
-  --color-arb-bg: oklch(0.16 0.025 270);          /* deep slate canvas */
-  --color-arb-surface: oklch(0.20 0.025 270);     /* card surface */
-  --color-arb-surface-hi: oklch(0.24 0.030 270);  /* hover surface */
-  --color-arb-line: oklch(0.30 0.020 270);        /* divider */
-  --color-arb-text: oklch(0.97 0.005 250);
-  --color-arb-text-dim: oklch(0.68 0.020 250);
-  --color-arb-text-faint: oklch(0.50 0.020 250);
+  --color-arb-bg: oklch(0.16 0.008 150);            /* near-black, faint green */
+  --color-arb-surface: oklch(0.21 0.010 150);       /* card surface */
+  --color-arb-surface-hi: oklch(0.26 0.012 150);    /* hover surface */
+  --color-arb-line: oklch(0.32 0.012 150);          /* divider */
+  --color-arb-text: oklch(0.96 0.005 150);
+  --color-arb-text-dim: oklch(0.72 0.012 150);
+  --color-arb-text-faint: oklch(0.55 0.015 150);
 
-  --color-arb-primary: oklch(0.78 0.16 75);       /* amber primary */
-  --color-arb-accent: oklch(0.66 0.21 295);       /* purple accent */
-  --color-arb-accent-soft: oklch(0.55 0.13 295);
+  --color-arb-primary: oklch(0.78 0.13 150);        /* sage / Stripe-green */
+  --color-arb-secondary: oklch(0.72 0.10 160);      /* muted mint */
+  --color-arb-accent: oklch(0.65 0.11 165);         /* deeper emerald */
+  --color-arb-accent-soft: oklch(0.55 0.08 165);
 
-  --color-arb-buy: oklch(0.72 0.18 145);          /* fill green */
-  --color-arb-info: oklch(0.74 0.15 220);         /* opportunity blue */
-  --color-arb-warn: oklch(0.78 0.18 75);          /* dry-run amber */
-  --color-arb-err: oklch(0.70 0.22 25);           /* error red */
-  --color-arb-muted: oklch(0.55 0.02 250);        /* no-fill grey */
+  /* Event-kind hues — distinct but desaturated. The green chrome no longer
+     fights with the badges. */
+  --color-arb-buy: oklch(0.78 0.13 150);            /* fill — sage */
+  --color-arb-info: oklch(0.74 0.10 195);           /* opportunity — cool teal */
+  --color-arb-warn: oklch(0.80 0.12 90);            /* dry-run — soft amber */
+  --color-arb-err: oklch(0.70 0.14 35);             /* error — muted coral */
+  --color-arb-muted: oklch(0.55 0.02 150);          /* no-fill — neutral grey */
 
-  --font-display: "Orbitron", "JetBrains Mono", system-ui, sans-serif;
-  --font-sans: "Exo 2", system-ui, -apple-system, sans-serif;
+  /* Direction colors for YES/NO prices. */
+  --color-arb-yes: oklch(0.80 0.13 150);
+  --color-arb-no: oklch(0.74 0.11 55);
+
+  --font-display: "Inter", system-ui, -apple-system, sans-serif;
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
 }
 
@@ -44,9 +47,10 @@ html {
 body {
   font-family: var(--font-sans);
   font-feature-settings: 'cv11', 'ss01';
+  letter-spacing: -0.005em;
 }
 
-/* Subtle scrollbar — keeps the dark theme cohesive instead of a default white track. */
+/* Subtle scrollbar. */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -55,16 +59,16 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: oklch(0.32 0.02 270);
+  background: oklch(0.32 0.01 150);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.42 0.02 270);
+  background: oklch(0.42 0.01 150);
 }
 
-/* Focus ring for keyboard nav — visible on every interactive surface. */
+/* Focus ring for keyboard nav. */
 :focus-visible {
-  outline: 2px solid var(--color-arb-accent);
+  outline: 2px solid var(--color-arb-primary);
   outline-offset: 2px;
   border-radius: 6px;
 }
@@ -74,7 +78,7 @@ body {
 @keyframes slide-in {
   from {
     opacity: 0;
-    transform: translateY(-6px);
+    transform: translateY(-4px);
   }
   to {
     opacity: 1;
@@ -86,23 +90,11 @@ body {
 }
 
 @keyframes pulse-dot {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.85); }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 .animate-pulse-dot {
-  animation: pulse-dot 1.8s ease-in-out infinite;
-}
-
-/* Ticker marquee — fixed-length scroll, paused on hover for accessibility. */
-@keyframes ticker-scroll {
-  from { transform: translateX(0); }
-  to { transform: translateX(-50%); }
-}
-.animate-ticker {
-  animation: ticker-scroll 45s linear infinite;
-}
-.animate-ticker:hover {
-  animation-play-state: paused;
+  animation: pulse-dot 2s ease-in-out infinite;
 }
 
 /* Drawer slide-in from the right. */
@@ -114,39 +106,10 @@ body {
   animation: drawer-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-/* Honor reduced-motion. */
 @media (prefers-reduced-motion: reduce) {
   .animate-slide-in,
   .animate-pulse-dot,
-  .animate-ticker,
   .animate-drawer {
     animation: none !important;
   }
-}
-
-/* Soft glow on KPI numbers — minimal as recommended by the dark-mode style guide. */
-.glow-amber {
-  text-shadow: 0 0 24px oklch(0.78 0.16 75 / 0.35);
-}
-.glow-accent {
-  text-shadow: 0 0 24px oklch(0.66 0.21 295 / 0.45);
-}
-
-/* Card gradient borders — purple→amber sweep along the top edge. */
-.gradient-edge {
-  position: relative;
-}
-.gradient-edge::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 1px;
-  background: linear-gradient(90deg,
-    transparent,
-    var(--color-arb-accent) 30%,
-    var(--color-arb-primary) 70%,
-    transparent
-  );
-  opacity: 0.6;
-  pointer-events: none;
 }

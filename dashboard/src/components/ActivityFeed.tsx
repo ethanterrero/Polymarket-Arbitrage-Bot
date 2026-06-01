@@ -29,16 +29,16 @@ function priceCell(yes: number | null, no: number | null) {
   if (yes !== null && no !== null) {
     return (
       <span className="font-mono text-xs">
-        <span className="text-emerald-400">Y {formatPrice(yes)}</span>
+        <span className="text-(--color-arb-yes)">Y {formatPrice(yes)}</span>
         <span className="mx-1 text-(--color-arb-text-faint)">·</span>
-        <span className="text-rose-400">N {formatPrice(no)}</span>
+        <span className="text-(--color-arb-no)">N {formatPrice(no)}</span>
       </span>
     )
   }
   if (yes !== null)
-    return <span className="font-mono text-xs text-emerald-400">Y {formatPrice(yes)}</span>
+    return <span className="font-mono text-xs text-(--color-arb-yes)">Y {formatPrice(yes)}</span>
   if (no !== null)
-    return <span className="font-mono text-xs text-rose-400">N {formatPrice(no)}</span>
+    return <span className="font-mono text-xs text-(--color-arb-no)">N {formatPrice(no)}</span>
   return <span className="text-xs text-(--color-arb-text-faint)">—</span>
 }
 
@@ -64,7 +64,7 @@ export function ActivityFeed({
   const interactive = !!onSelect
 
   return (
-    <Card className="gradient-edge flex h-full min-h-[480px] flex-col p-0">
+    <Card className="flex h-full min-h-[480px] flex-col p-0">
       <div className="border-b border-(--color-arb-line) p-5">
         <CardHeader
           title={title}
@@ -85,8 +85,8 @@ export function ActivityFeed({
                   <div className="flex w-16 shrink-0 flex-col gap-1">
                     <KindBadge kind={r.kind} />
                     {r.is_live && (
-                      <span className="font-mono text-[9px] uppercase tracking-wider text-emerald-400">
-                        live
+                      <span className="text-[10px] font-medium text-(--color-arb-primary)">
+                        Live
                       </span>
                     )}
                   </div>

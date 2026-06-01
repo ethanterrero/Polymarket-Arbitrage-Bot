@@ -54,8 +54,8 @@ export function DetailDrawer({ row, onClose }: DetailDrawerProps) {
             <div className="flex items-center gap-2">
               <KindBadge kind={row.kind} />
               {row.is_live && (
-                <span className="font-mono text-[10px] uppercase tracking-wider text-emerald-400">
-                  live
+                <span className="text-[11px] font-medium text-(--color-arb-primary)">
+                  Live
                 </span>
               )}
             </div>
@@ -84,12 +84,12 @@ export function DetailDrawer({ row, onClose }: DetailDrawerProps) {
             <Field label="Strategy">{row.strategy_mode ?? '—'}</Field>
             {yes !== null && (
               <Field label="YES price" mono>
-                <span className="text-emerald-400">{formatPrice(yes)}</span>
+                <span className="text-(--color-arb-yes)">{formatPrice(yes)}</span>
               </Field>
             )}
             {no !== null && (
               <Field label="NO price" mono>
-                <span className="text-rose-400">{formatPrice(no)}</span>
+                <span className="text-(--color-arb-no)">{formatPrice(no)}</span>
               </Field>
             )}
             {size !== null && (
@@ -117,8 +117,8 @@ export function DetailDrawer({ row, onClose }: DetailDrawerProps) {
           {row.detail !== null && row.detail !== undefined && (
             <div className="mt-6">
               <div className="mb-2 flex items-center justify-between">
-                <span className="text-[10px] uppercase tracking-wider text-(--color-arb-text-faint)">
-                  raw payload (detail)
+                <span className="text-xs text-(--color-arb-text-faint)">
+                  Raw payload (detail)
                 </span>
               </div>
               <pre className="max-h-96 overflow-auto rounded-lg border border-(--color-arb-line) bg-(--color-arb-bg) p-3 font-mono text-[11px] leading-relaxed text-(--color-arb-text-dim)">
@@ -141,7 +141,7 @@ interface FieldProps {
 function Field({ label, mono, children }: FieldProps) {
   return (
     <div className="rounded-md border border-(--color-arb-line) bg-(--color-arb-bg)/50 p-2.5">
-      <dt className="text-[10px] uppercase tracking-wider text-(--color-arb-text-faint)">
+      <dt className="text-[11px] text-(--color-arb-text-faint)">
         {label}
       </dt>
       <dd

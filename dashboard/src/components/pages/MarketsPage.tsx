@@ -46,7 +46,7 @@ export function MarketsPage({ activity, onSelectMarket }: MarketsPageProps) {
 
   return (
     <div className="flex flex-col gap-6 px-6 py-6">
-      <Card className="gradient-edge">
+      <Card className="">
         <CardHeader
           title="Markets"
           hint={`${formatInt(markets.length)} unique condition${markets.length === 1 ? '' : 's'} observed`}
@@ -70,12 +70,12 @@ export function MarketsPage({ activity, onSelectMarket }: MarketsPageProps) {
             type="button"
             onClick={() => onSelectMarket(m.conditionId)}
             className={cn(
-              'gradient-edge group relative cursor-pointer overflow-hidden rounded-xl border border-(--color-arb-line) bg-(--color-arb-surface)/70 p-5 text-left transition-colors hover:border-(--color-arb-accent)/40 hover:bg-(--color-arb-surface-hi)/70',
+              'group relative cursor-pointer overflow-hidden rounded-xl border border-(--color-arb-line) bg-(--color-arb-surface)/70 p-5 text-left transition-colors hover:border-(--color-arb-accent)/40 hover:bg-(--color-arb-surface-hi)/70',
             )}
           >
             <div className="flex items-start justify-between gap-2">
               <KindBadge kind={m.lastKind} />
-              <span className="font-mono text-[10px] uppercase text-(--color-arb-text-faint)">
+              <span className="text-[11px] text-(--color-arb-text-faint)">
                 {formatDistanceToNowStrict(new Date(m.lastTs), { addSuffix: true })}
               </span>
             </div>
@@ -96,10 +96,10 @@ export function MarketsPage({ activity, onSelectMarket }: MarketsPageProps) {
             {(m.lastYesPrice !== null || m.lastNoPrice !== null) && (
               <div className="mt-3 flex items-center gap-3 font-mono text-xs">
                 {m.lastYesPrice !== null && (
-                  <span className="text-emerald-400">Y {formatPrice(m.lastYesPrice)}</span>
+                  <span className="text-(--color-arb-yes)">Y {formatPrice(m.lastYesPrice)}</span>
                 )}
                 {m.lastNoPrice !== null && (
-                  <span className="text-rose-400">N {formatPrice(m.lastNoPrice)}</span>
+                  <span className="text-(--color-arb-no)">N {formatPrice(m.lastNoPrice)}</span>
                 )}
               </div>
             )}
@@ -125,9 +125,7 @@ interface StatProps {
 function Stat({ label, value, accent }: StatProps) {
   return (
     <div className="rounded-md border border-(--color-arb-line)/70 bg-(--color-arb-bg)/40 px-2.5 py-1.5">
-      <div className="text-[9px] uppercase tracking-wider text-(--color-arb-text-faint)">
-        {label}
-      </div>
+      <div className="text-[11px] text-(--color-arb-text-faint)">{label}</div>
       <div className={cn('font-mono text-sm text-(--color-arb-text) tabular-nums', accent)}>
         {value}
       </div>

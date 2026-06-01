@@ -29,7 +29,7 @@ export function DiagnosticsPage({ status, activity, snapshots }: DiagnosticsPage
 
   return (
     <div className="grid grid-cols-1 gap-6 px-6 py-6 lg:grid-cols-2">
-      <Card className="gradient-edge">
+      <Card className="">
         <CardHeader
           title="Connection"
           hint="realtime subscription state + Supabase target"
@@ -38,10 +38,10 @@ export function DiagnosticsPage({ status, activity, snapshots }: DiagnosticsPage
           <Row label="Realtime status">
             <span
               className={cn(
-                'rounded-md border px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider',
-                status === 'live' && 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
-                status === 'connecting' && 'border-amber-500/40 bg-amber-500/10 text-amber-300',
-                status === 'error' && 'border-red-500/40 bg-red-500/10 text-red-300',
+                'rounded-md border px-2 py-0.5 text-xs font-medium capitalize',
+                status === 'live' && 'border-(--color-arb-primary)/45 bg-(--color-arb-primary)/15 text-(--color-arb-primary)',
+                status === 'connecting' && 'border-(--color-arb-warn)/45 bg-(--color-arb-warn)/15 text-(--color-arb-warn)',
+                status === 'error' && 'border-(--color-arb-err)/45 bg-(--color-arb-err)/15 text-(--color-arb-err)',
               )}
             >
               {status}
@@ -55,7 +55,7 @@ export function DiagnosticsPage({ status, activity, snapshots }: DiagnosticsPage
           </Row>
           <Row label="Anon key present">
             {anonKey ? (
-              <span className="inline-flex items-center gap-1 text-emerald-400">
+              <span className="inline-flex items-center gap-1 text-(--color-arb-primary)">
                 <Check className="h-3.5 w-3.5" /> yes ({anonKey.length} chars)
               </span>
             ) : (
@@ -72,7 +72,7 @@ export function DiagnosticsPage({ status, activity, snapshots }: DiagnosticsPage
         </dl>
       </Card>
 
-      <Card className="gradient-edge">
+      <Card className="">
         <CardHeader
           title="Stream counts"
           hint="what's currently in the React state"
@@ -98,7 +98,7 @@ export function DiagnosticsPage({ status, activity, snapshots }: DiagnosticsPage
         </dl>
       </Card>
 
-      <Card className="gradient-edge lg:col-span-2">
+      <Card className="lg:col-span-2">
         <CardHeader title="How this dashboard talks to the bot" />
         <ol className="space-y-2 text-sm text-(--color-arb-text-dim)">
           <li>
@@ -135,7 +135,7 @@ interface RowProps {
 function Row({ label, mono, children }: RowProps) {
   return (
     <div className="flex items-center justify-between gap-4 py-2.5">
-      <dt className="text-[11px] uppercase tracking-wider text-(--color-arb-text-faint)">
+      <dt className="text-xs text-(--color-arb-text-faint)">
         {label}
       </dt>
       <dd

@@ -31,7 +31,7 @@ export function FilterChips({ selected, counts, onToggle, onClear }: FilterChips
             type="button"
             onClick={() => onToggle(k.id)}
             className={cn(
-              'group cursor-pointer rounded-full border px-3 py-1 font-mono text-[11px] uppercase tracking-wider transition-colors',
+              'group cursor-pointer rounded-full border px-3 py-1 text-xs font-medium transition-colors',
               active
                 ? 'border-(--color-arb-text)/50 bg-(--color-arb-surface-hi) text-(--color-arb-text)'
                 : 'border-(--color-arb-line) bg-(--color-arb-surface)/60 text-(--color-arb-text-dim) hover:border-(--color-arb-text-faint) hover:text-(--color-arb-text)',
@@ -50,7 +50,7 @@ export function FilterChips({ selected, counts, onToggle, onClear }: FilterChips
         <button
           type="button"
           onClick={onClear}
-          className="cursor-pointer rounded-full border border-transparent px-2 py-1 font-mono text-[11px] uppercase tracking-wider text-(--color-arb-text-faint) hover:text-(--color-arb-text)"
+          className="cursor-pointer rounded-full border border-transparent px-2 py-1 text-xs text-(--color-arb-text-faint) hover:text-(--color-arb-text)"
         >
           × clear
         </button>

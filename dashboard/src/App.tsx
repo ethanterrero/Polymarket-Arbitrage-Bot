@@ -111,7 +111,7 @@ function App() {
           )}
         </main>
 
-        <footer className="border-t border-(--color-arb-line) px-6 py-3 text-center font-mono text-[10px] uppercase tracking-[0.22em] text-(--color-arb-text-faint)">
+        <footer className="border-t border-(--color-arb-line) px-6 py-3 text-center text-xs text-(--color-arb-text-faint)">
           polymarket-arb · supabase realtime · {snapshots.length} snapshots · {activity.length} events
         </footer>
       </div>

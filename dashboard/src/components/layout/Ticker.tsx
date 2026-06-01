@@ -1,8 +1,8 @@
 import { useMemo } from 'react'
-import { KIND_COLORS } from '@/components/KindBadge'
-import { cn, formatPrice, formatUsd, shortHash } from '@/lib/utils'
-import type { ActivityRow } from '@/lib/types'
-import { toNumber } from '@/lib/types'
+import { formatDistanceToNowStrict } from 'date-fns'
+import { KindBadge } from '@/components/KindBadge'
+import { formatPrice, formatUsd, shortHash } from '@/lib/utils'
+import { toNumber, type ActivityRow } from '@/lib/types'
 
 interface TickerProps {
   rows: ActivityRow[]
@@ -11,75 +11,59 @@ interface TickerProps {
 }
 
 /**
- * A horizontally-scrolling ticker of the most recent events, styled like a
- * trading-floor tape. Pure CSS animation (paused on hover for readability),
- * so it costs almost nothing per re-render.
+ * A quiet, non-marquee strip of the most recent events under the top bar.
+ * Just the 3-4 newest, flowed inline with thin separators — no animation,
+ * no scrolling, no shouting.
  */
-export function Ticker({ rows, count = 14 }: TickerProps) {
+export function Ticker({ rows, count = 4 }: TickerProps) {
   const items = useMemo(() => {
-    const slice = rows.slice(0, count)
-    return slice.map((r) => {
-      const yes = toNumber(r.yes_price)
-      const no = toNumber(r.no_price)
-      const size = toNumber(r.size)
-      const profit = toNumber(r.expected_profit)
-      return {
-        id: r.id,
-        kind: r.kind,
-        color: KIND_COLORS[r.kind],
-        market: r.market_question ?? shortHash(r.condition_id),
-        yes,
-        no,
-        size,
-        profit,
-      }
-    })
+    return rows.slice(0, count).map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      market: r.market_question ?? shortHash(r.condition_id),
+      ts: r.ts,
+      yes: toNumber(r.yes_price),
+      no: toNumber(r.no_price),
+      profit: toNumber(r.expected_profit),
+    }))
   }, [rows, count])
 
   if (items.length === 0) {
     return (
-      <div className="border-b border-(--color-arb-line) bg-(--color-arb-surface)/40">
-        <div className="px-6 py-2 font-mono text-[11px] uppercase tracking-wider text-(--color-arb-text-faint)">
-          ··· awaiting events ···
+      <div className="border-b border-(--color-arb-line) bg-(--color-arb-bg)">
+        <div className="px-6 py-2.5 text-xs text-(--color-arb-text-faint)">
+          Awaiting events…
         </div>
       </div>
     )
   }
 
-  // Duplicate the list so the marquee loop stays seamless when it wraps.
-  const loop = [...items, ...items]
-
   return (
-    <div
-      className="relative overflow-hidden border-b border-(--color-arb-line) bg-(--color-arb-surface)/40"
-      aria-label="recent events ticker"
-    >
-      <div className="pointer-events-none absolute inset-y-0 left-0 z-10 w-12 bg-gradient-to-r from-(--color-arb-bg) to-transparent" />
-      <div className="pointer-events-none absolute inset-y-0 right-0 z-10 w-12 bg-gradient-to-l from-(--color-arb-bg) to-transparent" />
-      <div className="animate-ticker flex w-max gap-8 py-2 pl-6">
-        {loop.map((it, i) => (
+    <div className="border-b border-(--color-arb-line) bg-(--color-arb-bg)">
+      <div className="flex items-center gap-4 overflow-x-auto px-6 py-2.5 text-[12px]">
+        <span className="shrink-0 text-(--color-arb-text-faint)">Latest</span>
+        {items.map((it, i) => (
           <div
-            key={`${it.id}-${i}`}
-            className="flex items-center gap-2 whitespace-nowrap font-mono text-[11px] uppercase tracking-wider"
+            key={it.id}
+            className="flex shrink-0 items-center gap-2"
           >
-            <span
-              className="inline-block h-1.5 w-1.5 rounded-full"
-              style={{ backgroundColor: it.color }}
-            />
-            <span className="text-(--color-arb-text-dim)">{it.kind.replace('_', ' ')}</span>
-            <span className="text-(--color-arb-text)">{it.market}</span>
+            {i > 0 && <span className="text-(--color-arb-line)">·</span>}
+            <KindBadge kind={it.kind} />
+            <span className="max-w-[220px] truncate text-(--color-arb-text-dim)">
+              {it.market}
+            </span>
             {it.yes !== null && (
-              <span className="text-emerald-400">Y {formatPrice(it.yes)}</span>
+              <span className="font-mono text-(--color-arb-yes)">Y {formatPrice(it.yes)}</span>
             )}
-            {it.no !== null && <span className="text-rose-400">N {formatPrice(it.no)}</span>}
-            {it.size !== null && (
-              <span className="text-(--color-arb-text-faint)">
-                · sz {formatPrice(it.size, 2)}
-              </span>
+            {it.no !== null && (
+              <span className="font-mono text-(--color-arb-no)">N {formatPrice(it.no)}</span>
             )}
             {it.profit !== null && it.profit > 0 && (
-              <span className={cn('text-(--color-arb-buy)')}>+{formatUsd(it.profit)}</span>
+              <span className="font-mono text-(--color-arb-buy)">+{formatUsd(it.profit)}</span>
             )}
+            <span className="font-mono text-[11px] text-(--color-arb-text-faint)">
+              {formatDistanceToNowStrict(new Date(it.ts), { addSuffix: true })}
+            </span>
           </div>
         ))}
       </div>
