@@ -18,17 +18,24 @@
 | **Risk scaffolding** | Per-order caps, exposure, cooldowns, unpaired exposure limits, leg-level checks, sweep evaluation. |
 | **Execution structure** | `execute`, `execute_sweep`, `execute_leg` with dry-run paths and typed results (full / partial / error). |
 
-### Not production-ready (blockers for real money)
+### Largely resolved since this plan was first written
+
+| Was a blocker | Status (as of 2026-06-01) |
+|----------------|---------------------------|
+| ~~Always dry-run~~ | **Wired.** `execution.mode = "live"` + `POLYMARKET_PRIVATE_KEY` opts into `OrderExecutor::new_live`; default still dry-run. |
+| ~~CLOB L2 auth~~ | **Wired.** EIP-712 API-key derivation + HMAC request signing on every `/order` POST, pinned against Polymarket's reference vectors. |
+| ~~Balance = not from chain~~ | **Wired.** Monitor fetches balance from the CLOB on a 30 s loop; `RiskManager::update_balance` is called from that loop in `arb-bot/main.rs`. |
+| ~~No visibility into the bot~~ | **Wired.** `arb-recorder` ships activity + snapshots to Supabase; a React dashboard renders the live feed (see `dashboard/`). |
+
+### Still not production-ready (blockers for real money)
 
 | Gap | Why it matters |
 |-----|----------------|
-| **Always dry-run** | `main` always uses `OrderExecutor::new_dry_run`; private key does not enable live mode yet. |
-| **CLOB L2 auth** | API key derivation (EIP-712) and **HMAC request signing** are incomplete in `arb-executor` (placeholders / TODO). Without this, live orders will not authenticate. |
-| **Balance = not from chain** | Risk uses an internal balance that is not fed by on-chain USDC polling; `update_balance` exists but is not wired to Polygon RPC in the bot loop. |
-| **Fill truth** | Assumptions about success vs partial fill should be validated against real API responses and order lifecycle. |
+| **CLOB V2 migration** | Polymarket's new CLOB drops `taker`/`expiration`/`nonce`/`feeRateBps` and adds `timestamp`/`metadata`/`builder`; domain version `"1"` → `"2"`. Work is on `feat/clob-v2-migration` but not on `main` — live mode today targets V1, which Polymarket will retire. |
+| **Fill truth not validated under load** | Partial-fill, race-on-cancel, and post-resting-edge cases have unit tests but no live-fire shakedown. The startup allowance check verifies approvals exist; it does not verify the wire format end-to-end against the live CLOB. |
 | **Kalshi** | **No code** yet; separate API, auth, and product model. |
 
-**Stage label:** **Late prototype / pre-production** — strong **detection and strategy** surface area on Polymarket; **execution and funding truth** still need hardening before you trade meaningful size.
+**Stage label:** **Pre-production on Polymarket V1, late-prototype on V2.** Detection and strategy are solid; the V1 execution path is wire-format-correct on paper and waiting on a small-size live shakedown. V2 needs to land before V1 is retired, or live trading rots.
 
 ---
 
@@ -74,10 +81,13 @@
 
 ## 5. Immediate next steps (resume coding)
 
-1. **Polymarket CLOB auth:** implement derive-api-key flow + request signing per current Polymarket docs; gate `new_authenticated` behind env and tests.  
-2. **Balance source:** call `RiskManager::update_balance` from a real balance reader on an interval.  
-3. **Config switch:** `execution.mode = "dry_run" | "live"` so a key alone does not imply live trading.  
-4. **Kalshi spike:** read Kalshi API docs; sketch `Venue` trait and one `impl` for Polymarket to avoid duplicating strategy code later.
+The original items 1–3 (CLOB L2 auth, balance from chain, dry-run/live config switch) are all done — see the "Largely resolved" table above. The current shortlist:
+
+1. **First small-size live fill on Polymarket V1.** Cap `risk.max_order_size_usdc` to a few dollars and `risk.max_total_exposure_usdc` to ~$10–20. The startup allowance check verifies approvals exist; only an actual live POST verifies the full wire format against the production CLOB.
+2. **Bot-to-dashboard smoke test.** Drop `SUPABASE_SERVICE_KEY` into the root `.env`, set `[telemetry] enabled = true`, run dry-run, confirm rows land in `activity` / `snapshots` and on the dashboard. Snapshot loop fires every 30 s so this doesn't depend on a real arb showing up.
+3. **CLOB V2 migration.** Land `feat/clob-v2-migration` so live mode keeps working when Polymarket retires V1: drop `taker`/`expiration`/`nonce`/`feeRateBps`, add `timestamp`/`metadata`/`builder`, bump EIP-712 domain version `"1"` → `"2"`.
+4. **Phase 4 dashboard polish.** Seed / replay script so the screen is never empty during a live demo; sample-data toggle in the dashboard for offline use; Supabase WebSocket reconnect handling for mid-presentation drops.
+5. **Kalshi spike.** Read Kalshi API docs; sketch a `Venue` trait and one impl for Polymarket so strategies can consume a normalized book without duplicate code paths.
 
 ---
 

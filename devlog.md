@@ -2,6 +2,47 @@
 
 ---
 
+## 2026-06-01
+
+### What we did
+Built **Phase 2 + Phase 3** of the dashboard plan: the React frontend that consumes the `arb-recorder` data the bot writes to Supabase. Then iterated through three visual passes with the user — first too crypto-neon, then too restrained, finally landing on a Coinbase-inspired aesthetic that stuck. Shipped as PR #18 → main.
+
+### Phase 2 — frontend scaffolding (commit 1 of #18)
+- Vite + React 19 + TypeScript + Tailwind v4 + Recharts + `@supabase/supabase-js`. Single-page app under `dashboard/`.
+- `src/lib/supabase.ts` builds an anon-keyed client (the publishable key is committed to `dashboard/.env.example`; the bot's `service_role` key never enters this directory).
+- `useActivity` and `useSnapshots` hooks: initial `select … order by ts desc limit N`, then a `postgres_changes` INSERT subscription, dedup by row id, cap to N in memory.
+- First pass UI: a header bar, 5 KPI tiles, a balance/exposure area chart, an events-by-kind bar chart, and a scrolling activity feed with kind-coded badges and a slide-in animation on new realtime rows.
+- Verified end-to-end against the live Supabase project: seeded data, watched it appear, inserted a row via SQL, saw it slide in within ~200 ms, then cleared.
+
+### Phase 3 — sidebar nav + extra pages (commit 2 of #18)
+The single scroll page got busy. Added a left sidebar that switches between four routes (no react-router — a tiny `useState` route works fine):
+- **Overview** — the original page.
+- **Markets** — `groupByMarket(activity)` produces one card per observed `condition_id`, with event/fill/opp/error counts, last YES/NO price, expected profit. Click a card to jump to Activity pre-filtered to that market (`key={conditionId}` re-mount, prefilter prop).
+- **Activity** — full feed (300 rows). Kind chips with live counts + text search over question / condition_id, anded together. Click any row to open a slide-out detail drawer with every field plus the raw `detail` jsonb.
+- **Diagnostics** — realtime status, Supabase URL / project ref, anon-key presence, in-memory stream counts, oldest/newest event, and a numbered data-flow explainer.
+
+Also added a top "Latest" strip showing the 4 most recent events under the page title.
+
+### Three visual-pass iterations
+1. **Crypto-neon (rejected).** Orbitron + Exo 2 fonts, lime/mint/emerald layered greens, glowing KPI numbers, rainbow-gradient top borders on every card, marquee scrolling ticker. User: "kinda ugly, can we use a cleaner font and go for a cleaner, classier feel."
+2. **Restrained sage greens.** Dropped Orbitron entirely → Inter for everything (+ JetBrains Mono for numerics). Killed `glow-amber` / `glow-accent` text-shadows, killed `.gradient-edge`, killed the marquee, replaced with a static "Latest" strip. Desaturated the greens. Sentence-case labels throughout (no more `tracking-[0.2em] uppercase` micro-cap shouting). User: better, but "any way we can go for a coinbase kind of UI?"
+3. **Coinbase pass (landed).** Palette swung 150° → 260° hue (sage greens → cool slate). Primary became Coinbase blue `oklch(0.62 0.24 263)` (~#0052ff territory). Sidebar brand mark: outlined π pill → solid blue square with white glyph. Active nav item gained a **2 px blue rail** on the left edge — the Coinbase Advanced sidebar move. KPI numbers bumped 24 px → 28 px with `leading-none tracking-[-0.02em]` for the tight money-figure feel. Balance area line: green → Coinbase blue (the headline series owns the brand color); exposure stays green. Card borders softened to `line/50`. Saved the user's distilled UI taste to memory as `feedback_ui_taste.md` so future sessions don't loop back through Orbitron → "actually classier please".
+
+### The merge mishap
+First merge of #18 via `gh pr merge --merge` only landed the **first** of four commits on the branch. Cause: GitHub had `mergeable: UNKNOWN` after the last `git push` (hadn't recomputed yet), and the merge resolved against a cached PR head. Recovered by cherry-picking the three missing commits (`b2f22f5`, `cf70ac3`, `be8c446`) onto `main` and pushing. Lesson: after pushing more commits to a PR, wait for `gh pr view --json mergeable` to flip to `MERGEABLE` before invoking the merge — or just verify `git log main` post-merge has the count you expect.
+
+### State after today
+- `cargo test --workspace` — 77 pass on `main`, unchanged by this PR (the dashboard is a separate Vite project).
+- `npm run build --prefix dashboard` — clean: 830 kB JS / 240 kB gzip, 30 kB CSS / 6 kB gzip. Recharts is the bulk; if it ever matters, code-splitting the chart pages is the obvious next step.
+- The frontend is fully wired but the **bot has not yet been pointed at Supabase end-to-end** — that's still the same blocker as 2026-05-31's entry: needs the `service_role` key in root `.env` + `telemetry.enabled = true` + a dry-run.
+
+### Next steps
+1. Bot-to-dashboard smoke test (the carryover from 2026-05-31): drop `SUPABASE_SERVICE_KEY` into the root `.env`, flip `[telemetry] enabled = true`, run `cargo run -p arb-bot`, watch the dashboard populate. Snapshot loop fires every 30 s so balance + exposure curves appear within a minute even without a real arb.
+2. **Phase 4 — demo robustness.** A "seed" / replay script so the screen is never empty during a live demo; a sample-data toggle in the dashboard so it can run offline; reconnect handling for the Supabase WebSocket dropping mid-presentation.
+3. Optional polish: code-split the chart pages to drop the initial JS payload; build a small E2E test that asserts a SQL-inserted row reaches the rendered DOM within N ms.
+
+---
+
 ## 2026-05-17 (Phase 2 — Maker pricing in `analyze_asymmetric`)
 
 ### What we did
