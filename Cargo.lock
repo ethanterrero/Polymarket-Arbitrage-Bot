@@ -64,6 +64,7 @@ dependencies = [
  "arb-executor",
  "arb-inventory",
  "arb-monitor",
+ "arb-recorder",
  "arb-risk",
  "arb-scanner",
  "arb-strategy",
@@ -145,6 +146,23 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "arb-recorder"
+version = "0.1.0"
+dependencies = [
+ "arb-types",
+ "chrono",
+ "httpmock",
+ "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

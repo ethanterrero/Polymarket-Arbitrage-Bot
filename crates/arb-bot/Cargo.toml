@@ -12,6 +12,7 @@ arb-strategy = { path = "../arb-strategy" }
 arb-executor = { path = "../arb-executor" }
 arb-risk = { path = "../arb-risk" }
 arb-inventory = { path = "../arb-inventory" }
+arb-recorder = { path = "../arb-recorder" }
 tokio = { workspace = true }
 rust_decimal = { workspace = true }
 tracing = { workspace = true }

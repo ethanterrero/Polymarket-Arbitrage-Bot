@@ -1017,6 +1017,7 @@ mod tests {
                 level: "info".to_string(),
                 json_output: false,
             },
+            telemetry: arb_config::TelemetryConfig::default(),
         }
     }
 

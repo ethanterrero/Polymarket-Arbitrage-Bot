@@ -445,3 +445,42 @@ The size-truncation bug existed for as long as the signed-order path did, and th
 - Cap `risk.max_order_size_usdc` to a few dollars and `risk.max_total_exposure_usdc` to ~$10–20 for the first run. The new allowance check verifies approvals exist; it doesn't verify the wire format is right end-to-end against a real CLOB. A small-size shakedown is the cheapest way to learn if anything we missed bites.
 - If using a private Polygon RPC, set `polymarket.polygon_rpc_url` explicitly — public-RPC rate limits will surface as `RPC` errors at startup, not as silent failures.
 
+---
+
+## 2026-05-31
+
+### What we did
+Started a dashboard to visualize what the bot is doing (for a blockchain-club demo). This PR is **Phase 0 + Phase 1** of that effort: the data-capture pipeline. The bot can now record its activity to a Supabase (Postgres) database; a React frontend that reads/streams from it comes in a later PR.
+
+Decisions made up front: **Supabase Postgres + Realtime** for the data layer (built-in streaming, less backend code), capture the **full activity feed** (opportunities, dry-runs, fills — not just real fills, which are rare), and **React + Vite + Tailwind + shadcn/ui** for the eventual frontend.
+
+### Schema (Phase 0)
+`supabase/migrations/20260531_init_dashboard_schema.sql` is the exact migration applied to the project (ref `kawgriwaxfgvgcvyepjj`). Two tables:
+- `activity` — append-only feed, one row per event (`opportunity_detected | dry_run | full_fill | partial_fill | no_fill | error`), with prices/size/spread/profit columns plus a `jsonb` `detail` holding the full serialized result for audit.
+- `snapshots` — periodic bot state (balance, exposure, open positions) for time-series charts.
+
+RLS is read-only for the anon/publishable key the frontend will use; the bot inserts with the `service_role` key, which bypasses RLS. Realtime is enabled on both tables. Supabase security advisor: clean.
+
+### `arb-recorder` crate (Phase 1)
+New crate, deliberately **additive**: the trading core (`arb-risk`, `arb-executor`) does not depend on it, and no HTTP dependency leaks into those crates. `Recorder` exposes `record_opportunity`, `record_execution`, `record_leg_execution`, `record_snapshot`. Every write is **fire-and-forget** (`tokio::spawn` → PostgREST insert) and failure-tolerant — a Supabase outage logs a warning and never blocks or crashes the trading path. When telemetry is disabled, or `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` are absent, the recorder is a silent no-op, so existing behavior is unchanged.
+
+Decimals are carried to the wire as `f64` (JSON numbers PostgREST inserts cleanly into `numeric` columns); the lossless original is preserved in the `detail` jsonb. Credentials come from the environment, never the committed config — the `service_role` key is server-side only and must never reach the frontend.
+
+### Wiring
+- `arb-config`: new optional `[telemetry]` section (`enabled`, default false).
+- `arb-bot/main.rs`: build the recorder once, thread it through `try_simultaneous` / `try_asymmetric` exactly like `risk_manager` / `executor`. Emit an opportunity at detection (before risk, so risk-rejected opportunities still show), an execution event in each spawned task, and a state snapshot every 30s from the balance loop.
+- `arb-risk`: added a read-only `open_positions()` accessor (no logic change) for the snapshot.
+
+### State after today
+- `cargo test --workspace` — green; +4 tests in `arb-recorder` (httpmock-backed insert assertions, plus the disabled/no-op paths).
+- Branch: `feat/dashboard-telemetry`.
+- **Not yet done:** end-to-end smoke test against the live project (needs the `service_role` key in `.env`), and the React dashboard itself (Phase 2+).
+
+### Gotcha: don't run two cargo processes on one target dir
+While verifying, a `cargo build` and `cargo test --workspace` ran concurrently and produced a flurry of scary `failed to create dependency graph … (os error 2)` / `could not compile` errors across unrelated crates. Those were incremental-compilation corruption from two cargo invocations sharing `target/`, not real errors — a single clean run was green. Also: `cargo … | tail` masks cargo's exit code (you get `tail`'s 0), so check the captured output, not just the exit status.
+
+### Next steps
+1. Add the `service_role` key to `.env`, flip `telemetry.enabled = true`, run the bot in dry-run, and confirm rows land in `activity` / `snapshots` (snapshot loop fires within seconds, so this doesn't depend on a real arb appearing).
+2. Phase 2: scaffold the React + Vite dashboard, subscribe to `activity` via Realtime, render the live feed + status header.
+3. Phase 3: KPI cards and charts (cumulative expected profit, per-market activity, exposure over time). Phase 4: seed/replay script + demo config so the screen is never empty during a live demo.
+
