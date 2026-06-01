@@ -152,6 +152,13 @@ async fn main() -> Result<()> {
     });
 
     // Spawn periodic balance check.
+    //
+    // `fetch_balance` hits the CLOB's `/balance` endpoint, which requires L2
+    // HMAC authentication — there is no point calling it in dry-run because we
+    // have no API key to sign the request, and an unauthenticated response
+    // body fails to decode as JSON (showing up as the noisy "error decoding
+    // response body" warning). In dry-run we still want the rest of the loop
+    // to run so the dashboard sees periodic snapshots; we just skip the fetch.
     let risk_for_balance = risk_manager.clone();
     let monitor_for_balance = monitor.clone();
     let recorder_for_balance = recorder.clone();
@@ -159,9 +166,11 @@ async fn main() -> Result<()> {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         loop {
             interval.tick().await;
-            match monitor_for_balance.fetch_balance().await {
-                Ok(fetched) => risk_for_balance.update_balance(fetched).await,
-                Err(e) => warn!(error = %e, "Failed to fetch balance from CLOB"),
+            if is_live {
+                match monitor_for_balance.fetch_balance().await {
+                    Ok(fetched) => risk_for_balance.update_balance(fetched).await,
+                    Err(e) => warn!(error = %e, "Failed to fetch balance from CLOB"),
+                }
             }
             let balance = risk_for_balance.balance().await;
             let exposure = risk_for_balance.total_exposure().await;
