@@ -12,7 +12,7 @@ polygon_rpc_url = "https://polygon-rpc.com"
 mode = "dry_run"
 
 [strategy]
-min_net_spread = "0.005"
+min_net_spread = "0.001"
 base_fee_rate = "0.0"
 max_price_staleness_ms = 2000
 use_fok_orders = true
@@ -54,4 +54,14 @@ json_output = false
 # When true, the bot records activity (opportunities, dry-runs, fills) and
 # periodic state snapshots to Supabase so the dashboard can visualize them.
 # Requires SUPABASE_URL and SUPABASE_SERVICE_KEY in the environment (.env).
-enabled = false
+enabled = true
+
+# ── DEMO CONFIG ─────────────────────────────────────────────────────────
+# This file is set up for the blockchain-club presentation demo:
+#   - execution.mode = "dry_run"   → no real orders ever placed
+#   - telemetry.enabled = true     → every event streams to Supabase
+#   - strategy.min_net_spread = 0.001 (was 0.005)
+#       → captures near-arbs around 0.1% spread, not just the rare 0.5%+
+#         events. Safe in dry-run because no money moves.
+# For "production-style" defaults instead, see the values in the README's
+# Configuration section.
