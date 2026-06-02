@@ -32,8 +32,10 @@ const PAGE_META: Record<Route, { title: string; hint: string }> = {
 }
 
 function App() {
-  const { rows: activity, status } = useActivity(300)
-  const snapshots = useSnapshots(200)
+  // Caps bumped for the overnight demo collection. Reset to 300/200 when
+  // not doing a long-running data-collection session.
+  const { rows: activity, status } = useActivity(2000)
+  const snapshots = useSnapshots(2000)
 
   const [route, setRoute] = useState<Route>('overview')
   const [selectedRow, setSelectedRow] = useState<ActivityRow | null>(null)

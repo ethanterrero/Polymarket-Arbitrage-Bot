@@ -4,3 +4,6 @@
 *.key
 .claude
 .DS_Store
+# Bot runtime log from `cargo run -p arb-bot >> overnight.log` etc.
+overnight.log
+*.log

@@ -5,6 +5,8 @@ A Rust bot that detects and executes **binary prediction market arbitrage** on [
 A separate **React dashboard** in [`dashboard/`](dashboard/) visualizes everything the bot does in real time via Supabase Realtime.
 
 > **Status at a glance.** Detection + execution work end-to-end on Polymarket CLOB V1. Default mode is dry-run. Live mode is wired (EIP-712 signing, HMAC L2 auth, on-chain allowance check at boot) but should only be opted into with tiny size. CLOB V2 migration is in flight on a branch. 77 tests, `cargo test --workspace` green on `main`.
+>
+> **Current `main` is configured for a blockchain-club demo run** — telemetry on, looser `min_net_spread`, dashboard caps bumped. See [DEMO.md](DEMO.md) for the runbook and the slide-number queries. To return to production-style defaults, see the bottom of `DEMO.md`.
 
 For day-to-day engineering notes, per-PR rationale, and the ordered backlog, see **[devlog.md](devlog.md)**. For the term-project plan and scope decisions, see **[docs/TERM_PROJECT_PLAN.md](docs/TERM_PROJECT_PLAN.md)**.
 
@@ -207,6 +209,7 @@ Live mode is opt-in (`execution.mode = "live"` **and** `POLYMARKET_PRIVATE_KEY` 
 │   ├── TERM_PROJECT_PLAN.md
 │   └── ASYMMETRIC_MAKER_THESIS.md
 ├── devlog.md
+├── DEMO.md                         # demo runbook + slide queries
 ├── .env.example
 └── README.md
 ```
