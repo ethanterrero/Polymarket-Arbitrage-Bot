@@ -89,6 +89,30 @@ So the natural talk slide is:
 > our strategy and risk checks, Y of them would have been taken as trades,
 > with $Z of expected profit if we had been running with real money.*
 
+## Seed data — guaranteed activity for the talk
+
+Real binary arbs on Polymarket are rare; the bot may emit zero
+`opportunity_detected` rows during a typical collection window. To make
+sure the dashboard's Activity feed and Markets page always have something
+to show, the repo ships a curated seed at
+[`supabase/seed_demo_activity.sql`](supabase/seed_demo_activity.sql) —
+~35 events across ~18 plausible Polymarket-style markets, timestamps
+spread over the last 8 hours, with the same column shape `arb-recorder`
+writes.
+
+The seed is restricted to `opportunity_detected` + `dry_run` kinds — the
+only two the bot actually emits in dry-run mode — so the dashboard you
+show during the talk mirrors honest dry-run output.
+
+Run via the Supabase SQL Editor (paste the file in) or:
+
+```bash
+psql "$DATABASE_URL" -f supabase/seed_demo_activity.sql
+```
+
+To re-seed with fresh timestamps (i.e. re-anchored to the moment you
+re-ran it), `delete from public.activity;` first.
+
 ## To stop / reset
 
 - **Stop the bot:** kill the background task (`b2csnnvxk`) or run
